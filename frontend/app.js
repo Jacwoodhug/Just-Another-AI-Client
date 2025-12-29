@@ -52,7 +52,7 @@ let idleCaptureEnabled = false;
 let idleCaptureTimerId = null;
 let idleCaptureInProgress = false;
 let lastSpeechTime = Date.now();
-const IDLE_CAPTURE_MS = 60000;
+let IDLE_CAPTURE_MS = 60000;
 const MAX_SCREEN_WIDTH = 1280;
 let currentProvider = "ollama";
 const PROVIDER_LABELS = {
@@ -64,6 +64,18 @@ let ttsEnabled = true;
 const SESSION_STORAGE_KEY = "chatSessions";
 let editingSessionId = null;
 let editingSessionDraft = "";
+
+function isSpeechActive() {
+  // Check if user is actively speaking (has pending transcript)
+  if (pendingTranscript) {
+    return true;
+  }
+  // Check if TTS is currently speaking
+  if (window.speechSynthesis && speechSynthesis.speaking) {
+    return true;
+  }
+  return false;
+}
 
 function loadSession() {
   const stored = localStorage.getItem("sessionId");
@@ -636,15 +648,15 @@ async function handleIdleCapture() {
 }
 
 let thinkingTimerId = null;
-const THINKING_INTERVAL_MS = 30000;
+let THINKING_INTERVAL_MS = 30000;
 let thinkingLoopEnabled = true;
 
 async function handleThinkingTick() {
   if (!isListening || !thinkingLoopEnabled) {
     return;
   }
-  // Don't fire if user is actively speaking (pendingTranscript means speech is being captured)
-  if (idleCaptureInProgress || sendTimeoutId || pendingTranscript) {
+  // Don't fire if user or AI is actively speaking
+  if (idleCaptureInProgress || sendTimeoutId || isSpeechActive()) {
     // Reschedule for later
     scheduleNextThinkingTick();
     return;
@@ -694,22 +706,32 @@ function resetThinkingTimer() {
 // So we keep the screenshot watcher separate for now but maybe coordinate them.
 async function handleIdleCapture() {
   if (!idleCaptureEnabled || !screenStream || !isListening) {
-    // If screen is off or mic is off, we don't do idle screenshots
+    // Reschedule for later
+    scheduleNextIdleCapture();
     return;
   }
   if (idleCaptureInProgress) {
+    // Reschedule for later
+    scheduleNextIdleCapture();
     return;
   }
+  // Check if enough time has passed since last speech
   if (Date.now() - lastSpeechTime < IDLE_CAPTURE_MS) {
+    // Reschedule for later
+    scheduleNextIdleCapture();
     return;
   }
-  if (sendTimeoutId || pendingTranscript) {
+  // Don't fire if user or AI is actively speaking
+  if (sendTimeoutId || isSpeechActive()) {
+    // Reschedule for later
+    scheduleNextIdleCapture();
     return;
   }
 
   const imageBase64 = captureScreenBase64();
   if (!imageBase64) {
-    lastSpeechTime = Date.now();
+    // Reschedule for later
+    scheduleNextIdleCapture();
     return;
   }
 
@@ -721,18 +743,32 @@ async function handleIdleCapture() {
     });
   } finally {
     idleCaptureInProgress = false;
-    // Reset timer effectively
-    lastSpeechTime = Date.now();
   }
+
+  // Schedule next capture
+  scheduleNextIdleCapture();
+}
+
+function scheduleNextIdleCapture() {
+  if (idleCaptureTimerId) {
+    clearTimeout(idleCaptureTimerId);
+  }
+  idleCaptureTimerId = setTimeout(handleIdleCapture, IDLE_CAPTURE_MS);
 }
 
 function startIdleWatcher() {
   if (idleCaptureTimerId) {
     return;
   }
-  idleCaptureTimerId = setInterval(handleIdleCapture, 1000);
+  scheduleNextIdleCapture();
   // Start the thinking loop as well
   startThinkingWatcher();
+}
+
+function resetIdleCaptureTimer() {
+  if (idleCaptureEnabled && isListening) {
+    scheduleNextIdleCapture();
+  }
 }
 
 function setThinkingPanelOpen(open) {
@@ -1323,6 +1359,7 @@ function initRecognition() {
         if (textToSend) {
           sendText(textToSend);
           resetThinkingTimer();
+          resetIdleCaptureTimer();
         }
       }, 1000);
     }
@@ -1606,6 +1643,7 @@ sendBtn.addEventListener("click", () => {
   textInput.value = "";
   sendText(value);
   resetThinkingTimer();
+  resetIdleCaptureTimer();
 });
 
 textInput.addEventListener("keydown", (event) => {
@@ -1614,6 +1652,7 @@ textInput.addEventListener("keydown", (event) => {
     textInput.value = "";
     sendText(value);
     resetThinkingTimer();
+    resetIdleCaptureTimer();
   }
 });
 
@@ -1641,4 +1680,52 @@ const storedTts = localStorage.getItem("ttsEnabled");
 setTtsEnabled(storedTts !== "false");
 if (sessionPanel && !layout.classList.contains("sessions-collapsed")) {
   renderSessionList();
+}
+
+// Interval controls
+const thinkingIntervalInput = document.getElementById("thinkingIntervalInput");
+const screenshotIntervalInput = document.getElementById("screenshotIntervalInput");
+
+if (thinkingIntervalInput) {
+  // Load saved value
+  const savedThinking = localStorage.getItem("thinkingIntervalSeconds");
+  if (savedThinking) {
+    const seconds = parseInt(savedThinking, 10);
+    thinkingIntervalInput.value = seconds;
+    THINKING_INTERVAL_MS = seconds * 1000;
+  }
+
+  thinkingIntervalInput.addEventListener("change", () => {
+    const seconds = parseInt(thinkingIntervalInput.value, 10);
+    if (seconds >= 5 && seconds <= 300) {
+      THINKING_INTERVAL_MS = seconds * 1000;
+      localStorage.setItem("thinkingIntervalSeconds", seconds.toString());
+      // Reset timer with new interval
+      if (thinkingLoopEnabled && isListening) {
+        scheduleNextThinkingTick();
+      }
+    }
+  });
+}
+
+if (screenshotIntervalInput) {
+  // Load saved value
+  const savedScreenshot = localStorage.getItem("screenshotIntervalSeconds");
+  if (savedScreenshot) {
+    const seconds = parseInt(savedScreenshot, 10);
+    screenshotIntervalInput.value = seconds;
+    IDLE_CAPTURE_MS = seconds * 1000;
+  }
+
+  screenshotIntervalInput.addEventListener("change", () => {
+    const seconds = parseInt(screenshotIntervalInput.value, 10);
+    if (seconds >= 10 && seconds <= 600) {
+      IDLE_CAPTURE_MS = seconds * 1000;
+      localStorage.setItem("screenshotIntervalSeconds", seconds.toString());
+      // Reset timer with new interval
+      if (idleCaptureEnabled && isListening) {
+        scheduleNextIdleCapture();
+      }
+    }
+  });
 }

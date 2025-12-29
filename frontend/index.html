@@ -1,14 +1,17 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ollama Voice Chat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Grotesk:wght@400;500;600&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
+
 <body>
   <div class="grain"></div>
   <button class="burger" id="sessionToggle" type="button" aria-label="Sessions">
@@ -87,29 +90,39 @@
         <button id="newChatBtn">New chat</button>
       </section>
 
-    <section class="composer">
-      <input id="textInput" type="text" placeholder="Type a message if you prefer" />
-      <button class="primary" id="sendBtn">Send</button>
-    </section>
+      <section class="composer">
+        <input id="textInput" type="text" placeholder="Type a message if you prefer" />
+        <button class="primary" id="sendBtn">Send</button>
+      </section>
 
-    <section class="attachments">
-      <input id="imageInput" type="file" accept="image/*" hidden />
-      <div class="attachment-actions">
-        <button id="imageUploadBtn" type="button">Upload image</button>
-        <button id="imageClearBtn" type="button" disabled>Clear image</button>
-        <span class="attachment-hint">Paste an image to attach.</span>
-      </div>
-      <div class="capture-actions">
-        <div class="pill" id="screenStatus">Screen: off</div>
-        <button id="screenCaptureBtn" type="button">Enable screen</button>
-        <button class="pill toggle" id="idleCaptureToggle" type="button">Idle capture: off</button>
-        <button class="pill toggle" id="thinkingLoopToggle" type="button">Thinking loop: on</button>
-        <span class="attachment-hint">Auto-snapshot after 30s of silence.</span>
-      </div>
-      <div class="image-preview" id="imagePreview">
-        <span class="image-placeholder">No image attached.</span>
-      </div>
-    </section>
+      <section class="attachments">
+        <input id="imageInput" type="file" accept="image/*" hidden />
+        <div class="attachment-actions">
+          <button id="imageUploadBtn" type="button">Upload image</button>
+          <button id="imageClearBtn" type="button" disabled>Clear image</button>
+          <span class="attachment-hint">Paste an image to attach.</span>
+        </div>
+        <div class="capture-actions">
+          <div class="pill" id="screenStatus">Screen: off</div>
+          <button id="screenCaptureBtn" type="button">Enable screen</button>
+          <button class="pill toggle" id="idleCaptureToggle" type="button">Idle capture: off</button>
+          <button class="pill toggle" id="thinkingLoopToggle" type="button">Thinking loop: on</button>
+        </div>
+        <div class="capture-actions">
+          <label class="pill">
+            <span>Thinking interval (s)</span>
+            <input id="thinkingIntervalInput" type="number" min="5" max="300" value="30" style="width: 60px;" />
+          </label>
+          <label class="pill">
+            <span>Screenshot interval (s)</span>
+            <input id="screenshotIntervalInput" type="number" min="10" max="600" value="60" style="width: 60px;" />
+          </label>
+          <span class="attachment-hint">Adjust auto-capture timing.</span>
+        </div>
+        <div class="image-preview" id="imagePreview">
+          <span class="image-placeholder">No image attached.</span>
+        </div>
+      </section>
     </main>
 
     <aside class="thinking-panel" id="thinkingPanel" aria-hidden="true">
@@ -117,21 +130,21 @@
         <h3>Thinking</h3>
         <button class="ghost" id="thinkingClose" type="button">Close</button>
       </div>
-    <div class="thinking-section">
-      <h4>Summary</h4>
-      <p id="thinkingSummary">No summary yet.</p>
-    </div>
-    <div class="thinking-section">
-      <h4>Search</h4>
-      <p id="thinkingSearchQuery">No search yet.</p>
-      <ul id="thinkingSearchResults"></ul>
-    </div>
-    <div class="thinking-section">
-      <h4>Silent response</h4>
-      <div class="thinking-chat" id="thinkingSilentList">
-        <div class="thinking-empty">No silent response yet.</div>
+      <div class="thinking-section">
+        <h4>Summary</h4>
+        <p id="thinkingSummary">No summary yet.</p>
       </div>
-    </div>
+      <div class="thinking-section">
+        <h4>Search</h4>
+        <p id="thinkingSearchQuery">No search yet.</p>
+        <ul id="thinkingSearchResults"></ul>
+      </div>
+      <div class="thinking-section">
+        <h4>Silent response</h4>
+        <div class="thinking-chat" id="thinkingSilentList">
+          <div class="thinking-empty">No silent response yet.</div>
+        </div>
+      </div>
       <div class="thinking-section">
         <h4>Memory used</h4>
         <ul id="thinkingMemory"></ul>
@@ -141,4 +154,5 @@
 
   <script src="/static/app.js"></script>
 </body>
+
 </html>
