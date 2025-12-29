@@ -9,6 +9,8 @@ __pycache__/
 venv/
 .venv/
 env/
+python\ 3.12/
+
 
 # IDEs
 .vscode/
