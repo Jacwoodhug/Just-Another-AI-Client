@@ -41,7 +41,6 @@ Example `backend/.env`:
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.1:8b
 OLLAMA_EMBED_MODEL=nomic-embed-text
-SEARXNG_BASE_URL=http://192.168.1.232:8088
 SEARXNG_RESULTS=5
 LLM_PROVIDER=ollama
 OPENROUTER_API_KEY=
@@ -56,7 +55,6 @@ Available variables:
 - `OLLAMA_BASE_URL` (default: `http://localhost:11434`)
 - `OLLAMA_MODEL` (default: `llama3.1:8b`)
 - `OLLAMA_EMBED_MODEL` (default: `nomic-embed-text`)
-- `SEARXNG_BASE_URL` (default: `http://192.168.1.232:8088`)
 - `SEARXNG_RESULTS` (default: `5`)
 - `LLM_PROVIDER` (`ollama` or `openrouter`, default: `ollama`)
 - `OPENROUTER_API_KEY` (required when `LLM_PROVIDER=openrouter`)
