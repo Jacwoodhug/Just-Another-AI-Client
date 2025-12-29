@@ -52,7 +52,7 @@ let idleCaptureEnabled = false;
 let idleCaptureTimerId = null;
 let idleCaptureInProgress = false;
 let lastSpeechTime = Date.now();
-const IDLE_CAPTURE_MS = 30000;
+const IDLE_CAPTURE_MS = 60000;
 const MAX_SCREEN_WIDTH = 1280;
 let currentProvider = "ollama";
 const PROVIDER_LABELS = {
@@ -636,19 +636,23 @@ async function handleIdleCapture() {
 }
 
 let thinkingTimerId = null;
-const THINKING_INTERVAL_MS = 15000;
+const THINKING_INTERVAL_MS = 30000;
 let thinkingLoopEnabled = true;
 
 async function handleThinkingTick() {
   if (!isListening || !thinkingLoopEnabled) {
     return;
   }
-  // Allow thinking tick even if idle capture is pending; but be careful using shared flags
+  // Don't fire if user is actively speaking (pendingTranscript means speech is being captured)
   if (idleCaptureInProgress || sendTimeoutId || pendingTranscript) {
+    // Reschedule for later
+    scheduleNextThinkingTick();
     return;
   }
-  // If user spoke recently (within 5s), wait
-  if (Date.now() - lastSpeechTime < 5000) {
+  // Check if enough time has passed since last speech
+  if (Date.now() - lastSpeechTime < THINKING_INTERVAL_MS) {
+    // Reschedule for later
+    scheduleNextThinkingTick();
     return;
   }
 
@@ -660,13 +664,29 @@ async function handleThinkingTick() {
   } finally {
     idleCaptureInProgress = false;
   }
+
+  // Schedule next tick
+  scheduleNextThinkingTick();
+}
+
+function scheduleNextThinkingTick() {
+  if (thinkingTimerId) {
+    clearTimeout(thinkingTimerId);
+  }
+  thinkingTimerId = setTimeout(handleThinkingTick, THINKING_INTERVAL_MS);
 }
 
 function startThinkingWatcher() {
   if (thinkingTimerId) {
     return;
   }
-  thinkingTimerId = setInterval(handleThinkingTick, THINKING_INTERVAL_MS);
+  scheduleNextThinkingTick();
+}
+
+function resetThinkingTimer() {
+  if (thinkingLoopEnabled && isListening) {
+    scheduleNextThinkingTick();
+  }
 }
 
 // Kept for backward compatibility if needed, but thinking tick might replace it?
@@ -1302,6 +1322,7 @@ function initRecognition() {
         sendTimeoutId = null;
         if (textToSend) {
           sendText(textToSend);
+          resetThinkingTimer();
         }
       }, 1000);
     }
@@ -1584,6 +1605,7 @@ sendBtn.addEventListener("click", () => {
   const value = textInput.value;
   textInput.value = "";
   sendText(value);
+  resetThinkingTimer();
 });
 
 textInput.addEventListener("keydown", (event) => {
@@ -1591,6 +1613,7 @@ textInput.addEventListener("keydown", (event) => {
     const value = textInput.value;
     textInput.value = "";
     sendText(value);
+    resetThinkingTimer();
   }
 });
 
