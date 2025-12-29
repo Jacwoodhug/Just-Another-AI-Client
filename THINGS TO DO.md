@@ -1,0 +1,1 @@
+Allow AI to choose to capture the screen if it wants to for a more recent picture of what I am doing.

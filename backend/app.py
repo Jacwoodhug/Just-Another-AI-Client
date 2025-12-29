@@ -842,7 +842,10 @@ def chat(request: ChatRequest) -> ChatResponse:
     spoken_text = parsed.get("spoken_text", "")
     silent_text = parsed.get("silent_text", "")
 
-    if spoken_text:
+    # Don't store AI responses to thinking ticks in memory
+    is_thinking_tick = user_text == "[Thinking Tick]"
+    
+    if spoken_text and not is_thinking_tick:
         try:
             assistant_embedding = _ollama_embeddings(spoken_text)
         except requests.RequestException:
@@ -850,7 +853,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         store.add_message(session_id, "assistant", spoken_text, assistant_embedding)
 
     memory_note = parsed.get("memory_note", "")
-    if memory_note:
+    if memory_note and not is_thinking_tick:
         try:
             memory_embedding = _ollama_embeddings(memory_note)
         except requests.RequestException:

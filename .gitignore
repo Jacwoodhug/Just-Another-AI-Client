@@ -12,10 +12,9 @@ env/
 python\ 3.12/
 
 # DB
-memory.sqlite3
+backend/memory.sqlite3
 
 
 # IDEs
 .vscode/
 .idea/
-backend/
