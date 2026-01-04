@@ -7,6 +7,14 @@ A local-first voice chat web UI that sends transcribed speech to an Ollama LLM (
 - Ollama running locally
 - A browser that supports the Web Speech API (Chrome works well)
 
+## Basic Run Commands Post Setup
+
+```powershelll
+cd .\backend\
+.\.venv\Scripts\activate
+uvicorn app:app --reload
+```
+
 ## Setup
 1. Install dependencies:
 

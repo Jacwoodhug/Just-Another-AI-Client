@@ -54,6 +54,7 @@ let idleCaptureInProgress = false;
 let lastSpeechTime = Date.now();
 let IDLE_CAPTURE_MS = 60000;
 const MAX_SCREEN_WIDTH = 1280;
+const SCREENSHOT_REQUEST_TOKEN = "[REQUEST_SCREENSHOT]";
 let currentProvider = "ollama";
 const PROVIDER_LABELS = {
   ollama: "Local",
@@ -64,6 +65,8 @@ let ttsEnabled = true;
 const SESSION_STORAGE_KEY = "chatSessions";
 let editingSessionId = null;
 let editingSessionDraft = "";
+let screenshotRequestInProgress = false;
+let lastUserPrompt = "";
 
 function isSpeechActive() {
   // Check if user is actively speaking (has pending transcript)
@@ -617,6 +620,56 @@ function captureScreenBase64() {
   return dataUrl.split(",")[1] || "";
 }
 
+function stripScreenshotRequest(text) {
+  if (!text) {
+    return { cleaned: "", requested: false };
+  }
+  const requested = text.includes(SCREENSHOT_REQUEST_TOKEN);
+  if (!requested) {
+    return { cleaned: text, requested: false };
+  }
+  const tokenRegex = /^\s*\[REQUEST_SCREENSHOT\]\s*$/gm;
+  let cleaned = text.replace(tokenRegex, "");
+  cleaned = cleaned.split(SCREENSHOT_REQUEST_TOKEN).join(" ");
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  return { cleaned, requested: true };
+}
+
+async function requestScreenshotFromAssistant(options = {}) {
+  if (screenshotRequestInProgress) {
+    return;
+  }
+  if (!screenStream || !screenVideo) {
+    createChatItem(
+      "assistant",
+      "Assistant requested a screenshot. Click Enable screen to share.",
+      "status"
+    );
+    return;
+  }
+  const imageBase64 = captureScreenBase64();
+  if (!imageBase64) {
+    createChatItem(
+      "assistant",
+      "Assistant requested a screenshot, but the screen isn't ready yet.",
+      "status"
+    );
+    return;
+  }
+  const promptText = (options.promptText || lastUserPrompt || "").trim();
+  screenshotRequestInProgress = true;
+  try {
+    await sendText(promptText, {
+      imageBase64,
+      userLabel: "[Requested screenshot]",
+      hidden: true,
+      screenshotFollowup: true,
+    });
+  } finally {
+    screenshotRequestInProgress = false;
+  }
+}
+
 async function handleIdleCapture() {
   if (!idleCaptureEnabled || !screenStream || !isListening) {
     return;
@@ -1042,7 +1095,7 @@ function flushSpeechBuffer(force) {
   chunks.forEach((chunk) => queueSpeech(chunk));
 }
 
-async function sendTextNonStream(payload, shouldClearAttachment) {
+async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1065,6 +1118,13 @@ async function sendTextNonStream(payload, shouldClearAttachment) {
   if (data.provider) {
     setProviderBadge(data.provider);
   }
+  if (data.request_screenshot) {
+    await requestScreenshotFromAssistant({
+      promptText: sourceText,
+      reason: data.request_reason,
+    });
+    return;
+  }
 
   const summary = data.thinking_summary;
   const memoryUsed = Array.isArray(data.memory_used) ? data.memory_used : [];
@@ -1072,8 +1132,13 @@ async function sendTextNonStream(payload, shouldClearAttachment) {
   const searchResults = Array.isArray(data.search_results)
     ? data.search_results
     : [];
-  const spokenText = data.assistant_text || "";
-  const silentText = data.silent_text || "";
+  let spokenText = data.assistant_text || "";
+  let silentText = data.silent_text || "";
+  const spokenRequest = stripScreenshotRequest(spokenText);
+  const silentRequest = stripScreenshotRequest(silentText);
+  spokenText = spokenRequest.cleaned;
+  silentText = silentRequest.cleaned;
+  const requestedScreenshot = spokenRequest.requested || silentRequest.requested;
 
   if (spokenText) {
     addChat("assistant", spokenText);
@@ -1081,7 +1146,7 @@ async function sendTextNonStream(payload, shouldClearAttachment) {
   }
   if (silentText) {
     addThinkingMessage(silentText);
-  } else if (!spokenText) {
+  } else if (!spokenText && !requestedScreenshot) {
     addThinkingMessage("Assistant chose to stay silent.");
   }
 
@@ -1094,6 +1159,9 @@ async function sendTextNonStream(payload, shouldClearAttachment) {
   });
 
   updateThinkingPanel(summary, memoryUsed, searchQuery, searchResults);
+  if (requestedScreenshot) {
+    requestScreenshotFromAssistant({ promptText: sourceText });
+  }
   if (shouldClearAttachment) {
     clearImage();
   }
@@ -1101,6 +1169,8 @@ async function sendTextNonStream(payload, shouldClearAttachment) {
 
 async function sendText(text, options = {}) {
   const trimmed = (text || "").trim();
+  const hidden = Boolean(options.hidden);
+  const screenshotFollowup = Boolean(options.screenshotFollowup);
   const overrideImage = (options.imageBase64 || "").trim();
   const usingAttachment = !overrideImage && attachedImage && attachedImage.base64;
   const imageBase64 = overrideImage || (usingAttachment ? attachedImage.base64 : "");
@@ -1110,11 +1180,14 @@ async function sendText(text, options = {}) {
 
   const userLabel =
     options.userLabel || trimmed || (imageBase64 ? "[Image]" : "");
-  if (!options.hidden) {
+  if (!hidden) {
     addChat("user", userLabel);
   }
   interimText.textContent = "...";
-  if (!options.hidden) {
+  if (!hidden) {
+    if (trimmed) {
+      lastUserPrompt = trimmed;
+    }
     markSpeechActivity();
   }
   if (window.speechSynthesis && speechSynthesis.speaking) {
@@ -1127,6 +1200,12 @@ async function sendText(text, options = {}) {
   }
   if (trimmed) {
     payload.text = trimmed;
+  }
+  if (hidden) {
+    payload.hidden = true;
+  }
+  if (screenshotFollowup) {
+    payload.screenshot_followup = true;
   }
   const selectedModel = modelSelect && modelSelect.value;
   if (selectedModel) {
@@ -1149,7 +1228,7 @@ async function sendText(text, options = {}) {
     });
 
     if (!response.ok || !response.body) {
-      await sendTextNonStream(payload, shouldClearAttachment);
+      await sendTextNonStream(payload, shouldClearAttachment, trimmed);
       return;
     }
 
@@ -1160,6 +1239,8 @@ async function sendText(text, options = {}) {
     let lastMemory = [];
     let streamHadError = false;
     speechBuffer = "";
+    let requestedScreenshot = false;
+    let requestReason = "";
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -1218,6 +1299,12 @@ async function sendText(text, options = {}) {
           continue;
         }
 
+        if (message.type === "request_screenshot") {
+          requestedScreenshot = true;
+          requestReason = message.reason || "";
+          continue;
+        }
+
         if (message.type === "token") {
           if (!receivedMeta || !message.text) {
             continue;
@@ -1225,6 +1312,11 @@ async function sendText(text, options = {}) {
           const channel = message.channel || "spoken";
           if (channel === "silent") {
             silentText += message.text;
+            const screenshotRequest = stripScreenshotRequest(silentText);
+            silentText = screenshotRequest.cleaned;
+            if (screenshotRequest.requested) {
+              requestedScreenshot = true;
+            }
             if (!silentDraftItem) {
               silentDraftItem = addThinkingMessage("", true);
             }
@@ -1239,11 +1331,19 @@ async function sendText(text, options = {}) {
           }
 
           spokenText += message.text;
+          const spokenRequest = stripScreenshotRequest(spokenText);
+          spokenText = spokenRequest.cleaned;
+          if (spokenRequest.requested) {
+            requestedScreenshot = true;
+          }
           if (!assistantItem) {
             assistantItem = createChatItem("assistant", "");
           }
           assistantItem.body.textContent = spokenText.trim();
-          speechBuffer += message.text;
+          const speechChunk = message.text
+            .split(SCREENSHOT_REQUEST_TOKEN)
+            .join(" ");
+          speechBuffer += speechChunk;
           flushSpeechBuffer(false);
           continue;
         }
@@ -1262,7 +1362,25 @@ async function sendText(text, options = {}) {
 
         if (message.type === "done") {
           flushSpeechBuffer(true);
-          if (!spokenText.trim() && !silentText.trim()) {
+          if (
+            silentDraftItem &&
+            !silentText.trim() &&
+            !silentDraftItem.textContent.trim()
+          ) {
+            silentDraftItem.remove();
+            silentDraftItem = null;
+            if (
+              thinkingSilentList &&
+              !thinkingSilentList.querySelector(".thinking-item") &&
+              !thinkingSilentList.querySelector(".thinking-empty")
+            ) {
+              const placeholder = document.createElement("div");
+              placeholder.className = "thinking-empty";
+              placeholder.textContent = "No silent response yet.";
+              thinkingSilentList.appendChild(placeholder);
+            }
+          }
+          if (!spokenText.trim() && !silentText.trim() && !requestedScreenshot) {
             addThinkingMessage("Assistant chose to stay silent.");
           }
           if (spokenText.trim()) {
@@ -1271,15 +1389,21 @@ async function sendText(text, options = {}) {
           if (shouldClearAttachment && !streamHadError) {
             clearImage();
           }
+          if (requestedScreenshot) {
+            requestScreenshotFromAssistant({
+              promptText: trimmed,
+              reason: requestReason,
+            });
+          }
         }
       }
     }
 
     if (!receivedMeta) {
-      await sendTextNonStream(payload, shouldClearAttachment);
+      await sendTextNonStream(payload, shouldClearAttachment, trimmed);
     }
   } catch (error) {
-    await sendTextNonStream(payload, shouldClearAttachment);
+    await sendTextNonStream(payload, shouldClearAttachment, trimmed);
   }
 }
 

@@ -130,6 +130,16 @@ SEARCH_DECIDER_PROMPT = (
     "If no search is needed, use {\"use_search\": false, \"search_query\": \"\"}."
 )
 
+SCREENSHOT_DECIDER_PROMPT = (
+    "You decide whether a fresh screenshot of the user's screen is required "
+    "to answer the user's request accurately. "
+    "Respond with valid JSON only. No other text.\n"
+    "Format: {\"request_screenshot\": boolean, \"reason\": string}\n"
+    "If no screenshot is needed, use {\"request_screenshot\": false, \"reason\": \"\"}.\n"
+    "Request a screenshot when the user asks what is on the screen, to describe UI/visuals, "
+    "or when on-screen content is required to answer."
+)
+
 
 
 class ChatRequest(BaseModel):
@@ -138,6 +148,8 @@ class ChatRequest(BaseModel):
     model: Optional[str] = None
     image_base64: Optional[str] = None
     provider: Optional[str] = None
+    hidden: Optional[bool] = False
+    screenshot_followup: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -150,6 +162,8 @@ class ChatResponse(BaseModel):
     search_query: str = ""
     search_results: List[Dict[str, str]] = Field(default_factory=list)
     provider: str = ""
+    request_screenshot: bool = False
+    request_reason: str = ""
 
 
 class ModelListResponse(BaseModel):
@@ -486,6 +500,29 @@ def _decide_search_query(
     return ""
 
 
+def _decide_screenshot_request(
+    user_text: str, model: str, provider: Optional[str] = None
+) -> Tuple[bool, str]:
+    if not user_text:
+        return False, ""
+    messages = [
+        {"role": "system", "content": SCREENSHOT_DECIDER_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+    try:
+        content = _llm_chat(messages, model, provider)
+        print(f"DEBUG: Screenshot decider raw content: {content!r}")
+    except (requests.RequestException, RuntimeError) as exc:
+        print(f"DEBUG: Screenshot decider error: {exc}")
+        return False, ""
+    request, reason = _parse_screenshot_decider(content)
+    print(
+        "DEBUG: Parsed screenshot decision: "
+        f"request_screenshot={request}, reason={reason!r}"
+    )
+    return request, reason
+
+
 def _ollama_running_models() -> List[str]:
     url = f"{OLLAMA_BASE_URL}/api/ps"
     try:
@@ -607,6 +644,30 @@ def _parse_search_decider(content: str) -> Tuple[bool, str]:
         if query_match:
             query = query_match.group(1).strip()
         return use_search, query
+
+    return False, ""
+
+
+def _parse_screenshot_decider(content: str) -> Tuple[bool, str]:
+    cleaned = _strip_code_fence(content)
+    header = _parse_header_block(cleaned)
+    if header:
+        request = bool(header.get("request_screenshot", False))
+        reason = str(header.get("reason", "")).strip()
+        return request, reason
+
+    request_match = re.search(
+        r"request_screenshot\s*[:=]\s*(true|false)", cleaned, re.I
+    )
+    if request_match:
+        request = request_match.group(1).lower() == "true"
+        reason = ""
+        reason_match = re.search(r"reason\s*[:=]\s*\"([^\"]+)\"", cleaned, re.I)
+        if not reason_match:
+            reason_match = re.search(r"reason\s*[:=]\s*'([^']+)'", cleaned, re.I)
+        if reason_match:
+            reason = reason_match.group(1).strip()
+        return request, reason
 
     return False, ""
 
@@ -783,11 +844,44 @@ def chat(request: ChatRequest) -> ChatResponse:
     user_text = (request.text or "").strip()
     image_base64 = (request.image_base64 or "").strip()
     has_image = bool(image_base64)
+    hidden = bool(request.hidden)
+    screenshot_followup = bool(request.screenshot_followup)
     if not user_text and not has_image:
         raise HTTPException(status_code=400, detail="Text or image is required")
     provider = _normalize_provider(request.provider)
     default_model = _default_model(provider)
     selected_model = (request.model or default_model).strip() or default_model
+
+    if (
+        user_text
+        and not has_image
+        and not hidden
+        and not screenshot_followup
+        and user_text != "[Thinking Tick]"
+    ):
+        request_screenshot, reason = _decide_screenshot_request(
+            user_text, selected_model, provider
+        )
+        if request_screenshot:
+            store.add_message(
+                session_id,
+                "user",
+                user_text or "[Image]",
+                None,
+            )
+            return ChatResponse(
+                session_id=session_id,
+                assistant_text="",
+                silent_text="",
+                speak=False,
+                memory_used=[],
+                thinking_summary="",
+                search_query="",
+                search_results=[],
+                provider=provider,
+                request_screenshot=True,
+                request_reason=reason,
+            )
 
     recent = store.get_recent(session_id, limit=8)
 
@@ -809,6 +903,16 @@ def chat(request: ChatRequest) -> ChatResponse:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": _current_time_context()},
     ]
+    if screenshot_followup:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "A fresh screenshot is attached. "
+                    "Use it to answer the user's request directly."
+                ),
+            }
+        )
     if memory_lines:
         memory_block = "Relevant memory snippets:\n" + "\n".join(
             f"- {line}" for line in memory_lines
@@ -831,7 +935,7 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     parsed = _coerce_response(raw_content)
 
-    if user_text != "[Thinking Tick]":
+    if not hidden and user_text != "[Thinking Tick]":
         store.add_message(
             session_id,
             "user",
@@ -879,18 +983,60 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     user_text = (request.text or "").strip()
     image_base64 = (request.image_base64 or "").strip()
     has_image = bool(image_base64)
+    hidden = bool(request.hidden)
+    screenshot_followup = bool(request.screenshot_followup)
     if not user_text and not has_image:
         raise HTTPException(status_code=400, detail="Text or image is required")
     provider = _normalize_provider(request.provider)
     default_model = _default_model(provider)
     selected_model = (request.model or default_model).strip() or default_model
 
-    recent = store.get_recent(session_id, limit=8)
+    if (
+        user_text
+        and not has_image
+        and not hidden
+        and not screenshot_followup
+        and user_text != "[Thinking Tick]"
+    ):
+        request_screenshot, reason = _decide_screenshot_request(
+            user_text, selected_model, provider
+        )
+        if request_screenshot:
+            store.add_message(
+                session_id,
+                "user",
+                user_text or "[Image]",
+                None,
+            )
+
+            def generate_request() -> Iterable[str]:
+                meta = {
+                    "type": "meta",
+                    "session_id": session_id,
+                    "memory_used": [],
+                    "thinking_summary": "",
+                    "search_query": "",
+                    "search_results": [],
+                    "provider": provider,
+                }
+                yield json.dumps(meta) + "\n"
+                yield json.dumps(
+                    {"type": "request_screenshot", "reason": reason}
+                ) + "\n"
+                yield json.dumps(
+                    {"type": "done", "spoken_text": "", "silent_text": ""}
+                ) + "\n"
+
+            return StreamingResponse(
+                generate_request(), media_type="application/x-ndjson"
+            )
 
     try:
         user_embedding = _ollama_embeddings(user_text) if user_text else []
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
+
+    recent = store.get_recent(session_id, limit=8)
 
     memories = store.search(user_embedding, top_k=4) if user_embedding else []
     memory_lines = [
@@ -905,6 +1051,16 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": _current_time_context()},
     ]
+    if screenshot_followup:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "A fresh screenshot is attached. "
+                    "Use it to answer the user's request directly."
+                ),
+            }
+        )
     if memory_lines:
         memory_block = "Relevant memory snippets:\n" + "\n".join(
             f"- {line}" for line in memory_lines
@@ -1106,12 +1262,13 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             spoken_text = "".join(spoken_chunks).strip()
             silent_text = "".join(silent_chunks).strip()
 
-            store.add_message(
-                session_id,
-                "user",
-                user_text or "[Image]",
-                user_embedding if user_embedding else None,
-            )
+            if not hidden and user_text != "[Thinking Tick]":
+                store.add_message(
+                    session_id,
+                    "user",
+                    user_text or "[Image]",
+                    user_embedding if user_embedding else None,
+                )
 
             if spoken_text:
                 try:
