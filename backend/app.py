@@ -831,46 +831,35 @@ def _strip_json_artifacts(text: str) -> str:
         return ""
     cleaned = re.sub(r"^\s*```(?:json)?\s*[\s\S]*?```\s*", "", text, flags=re.I)
 
-    def strip_leading(value: str) -> str:
-        while True:
-            stripped = value.lstrip()
-            if not stripped:
-                return ""
-            line_end = stripped.find("\n")
-            line = stripped if line_end == -1 else stripped[:line_end]
-            line_stripped = line.strip()
-            if not line_stripped:
-                value = stripped[line_end + 1 :] if line_end != -1 else ""
-                continue
-            if line_stripped.startswith("{") and line_stripped.endswith("}"):
-                value = stripped[line_end + 1 :] if line_end != -1 else ""
-                continue
-            if line_stripped.startswith("```"):
-                value = stripped[line_end + 1 :] if line_end != -1 else ""
-                continue
-            if re.search(
-                r"\"(?:memory_note|thinking_summary|assistant_text|speak)\"",
-                line_stripped,
-            ):
-                value = stripped[line_end + 1 :] if line_end != -1 else ""
-                continue
-            if re.search(
-                r"\b(memory_note|thinking_summary|assistant_text|speak)\b",
-                line_stripped,
-            ):
-                value = stripped[line_end + 1 :] if line_end != -1 else ""
-                continue
-            if re.match(
-                r"^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]",
-                line_stripped,
-                re.I,
-            ):
-                value = stripped[line_end + 1 :] if line_end != -1 else ""
-                continue
-            return value
-
-    cleaned = strip_leading(cleaned)
-    return cleaned.strip()
+    while True:
+        match = re.search(r"\S", cleaned)
+        if not match:
+            return cleaned.strip()
+        start = match.start()
+        line_end = cleaned.find("\n", start)
+        line = cleaned[start:] if line_end == -1 else cleaned[start:line_end]
+        line_stripped = line.strip()
+        looks_like_json = line_stripped.startswith("{") and line_stripped.endswith("}")
+        has_header_keys = re.search(
+            r"\"(?:memory_note|thinking_summary|assistant_text|speak)\"",
+            line_stripped,
+        )
+        has_header_prefix = re.match(
+            r"^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]",
+            line_stripped,
+            re.I,
+        )
+        if not line_stripped:
+            return cleaned.strip()
+        if not (
+            looks_like_json
+            or has_header_keys
+            or has_header_prefix
+            or line_stripped.startswith("```")
+        ):
+            return cleaned.strip()
+        remove_end = len(cleaned) if line_end == -1 else line_end + 1
+        cleaned = cleaned[remove_end:]
 
 
 def _coerce_response(content: str) -> Dict[str, Any]:

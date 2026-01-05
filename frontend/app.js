@@ -698,46 +698,38 @@ function stripJsonArtifacts(text, options = {}) {
   const trimEdges = options.trimEdges !== false;
   let cleaned = text.replace(/^\s*```(?:json)?[\s\S]*?```\s*/i, "");
   while (true) {
-    const trimmed = cleaned.replace(/^\s+/, "");
-    if (!trimmed) {
-      return "";
+    const firstNonWhitespace = cleaned.search(/\S/);
+    if (firstNonWhitespace === -1) {
+      return trimEdges ? cleaned.trim() : cleaned;
     }
-    const lineEnd = trimmed.search(/\r?\n/);
-    const line = lineEnd === -1 ? trimmed : trimmed.slice(0, lineEnd);
+    const lineEnd = cleaned.indexOf("\n", firstNonWhitespace);
+    const line =
+      lineEnd === -1
+        ? cleaned.slice(firstNonWhitespace)
+        : cleaned.slice(firstNonWhitespace, lineEnd);
     const lineStripped = line.trim();
+    const looksLikeJson =
+      lineStripped.startsWith("{") && lineStripped.endsWith("}");
+    const hasHeaderKeys = /"(memory_note|thinking_summary|assistant_text|speak)"/.test(
+      lineStripped
+    );
+    const hasHeaderPrefix = /^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]/i.test(
+      lineStripped
+    );
     if (!lineStripped) {
-      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
-      continue;
-    }
-    if (lineStripped.startsWith("{") && lineStripped.endsWith("}")) {
-      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
-      continue;
-    }
-    if (lineStripped.startsWith("```")) {
-      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
-      continue;
+      return trimEdges ? cleaned.trim() : cleaned;
     }
     if (
-      /"(memory_note|thinking_summary|assistant_text|speak)"/.test(lineStripped)
+      !looksLikeJson &&
+      !hasHeaderKeys &&
+      !hasHeaderPrefix &&
+      !lineStripped.startsWith("```")
     ) {
-      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
-      continue;
+      return trimEdges ? cleaned.trim() : cleaned;
     }
-    if (/\b(memory_note|thinking_summary|assistant_text|speak)\b/i.test(lineStripped)) {
-      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
-      continue;
-    }
-    if (
-      /^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]/i.test(
-        lineStripped
-      )
-    ) {
-      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
-      continue;
-    }
-    break;
+    const removeEnd = lineEnd === -1 ? cleaned.length : lineEnd + 1;
+    cleaned = cleaned.slice(removeEnd);
   }
-  return trimEdges ? cleaned.trim() : cleaned;
 }
 
 async function requestScreenshotFromAssistant(options = {}) {
