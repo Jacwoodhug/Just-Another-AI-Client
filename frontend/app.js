@@ -691,6 +691,55 @@ function stripScreenshotRequest(text) {
   return { cleaned, requested: true };
 }
 
+function stripJsonArtifacts(text, options = {}) {
+  if (!text) {
+    return "";
+  }
+  const trimEdges = options.trimEdges !== false;
+  let cleaned = text.replace(/^\s*```(?:json)?[\s\S]*?```\s*/i, "");
+  while (true) {
+    const trimmed = cleaned.replace(/^\s+/, "");
+    if (!trimmed) {
+      return "";
+    }
+    const lineEnd = trimmed.search(/\r?\n/);
+    const line = lineEnd === -1 ? trimmed : trimmed.slice(0, lineEnd);
+    const lineStripped = line.trim();
+    if (!lineStripped) {
+      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
+      continue;
+    }
+    if (lineStripped.startsWith("{") && lineStripped.endsWith("}")) {
+      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
+      continue;
+    }
+    if (lineStripped.startsWith("```")) {
+      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
+      continue;
+    }
+    if (
+      /"(memory_note|thinking_summary|assistant_text|speak)"/.test(lineStripped)
+    ) {
+      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
+      continue;
+    }
+    if (/\b(memory_note|thinking_summary|assistant_text|speak)\b/i.test(lineStripped)) {
+      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
+      continue;
+    }
+    if (
+      /^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]/i.test(
+        lineStripped
+      )
+    ) {
+      cleaned = lineEnd === -1 ? "" : trimmed.slice(lineEnd + 1);
+      continue;
+    }
+    break;
+  }
+  return trimEdges ? cleaned.trim() : cleaned;
+}
+
 async function requestScreenshotFromAssistant(options = {}) {
   if (screenshotRequestInProgress) {
     return;
@@ -1266,6 +1315,8 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
   const silentRequest = stripScreenshotRequest(silentText);
   spokenText = spokenRequest.cleaned;
   silentText = silentRequest.cleaned;
+  spokenText = stripJsonArtifacts(spokenText);
+  silentText = stripJsonArtifacts(silentText);
   const requestedScreenshot = spokenRequest.requested || silentRequest.requested;
 
   if (spokenText) {
@@ -1383,6 +1434,7 @@ async function sendText(text, options = {}) {
     speechBuffer = "";
     let requestedScreenshot = false;
     let requestReason = "";
+    let lastSpokenSanitized = "";
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -1460,11 +1512,12 @@ async function sendText(text, options = {}) {
             if (screenshotRequest.requested) {
               requestedScreenshot = true;
             }
+            silentText = stripJsonArtifacts(silentText, { trimEdges: false });
             if (!silentDraftItem) {
               silentDraftItem = addThinkingMessage("", true);
             }
             if (silentDraftItem) {
-              silentDraftItem.textContent = silentText.trim();
+              silentDraftItem.textContent = silentText.trimEnd();
               if (thinkingSilentList) {
                 thinkingSilentList.scrollTop =
                   thinkingSilentList.scrollHeight;
@@ -1479,15 +1532,23 @@ async function sendText(text, options = {}) {
           if (spokenRequest.requested) {
             requestedScreenshot = true;
           }
+          spokenText = stripJsonArtifacts(spokenText, { trimEdges: false });
           if (!assistantItem) {
             assistantItem = createChatItem("assistant", "");
           }
-          assistantItem.body.textContent = spokenText.trim();
-          const speechChunk = message.text
-            .split(SCREENSHOT_REQUEST_TOKEN)
-            .join(" ");
-          speechBuffer += speechChunk;
-          flushSpeechBuffer(false);
+          const spokenDisplay = spokenText.trimEnd();
+          assistantItem.body.textContent = spokenDisplay;
+          if (spokenDisplay.startsWith(lastSpokenSanitized)) {
+            const newChunk = spokenDisplay.slice(lastSpokenSanitized.length);
+            if (newChunk) {
+              speechBuffer += newChunk;
+              flushSpeechBuffer(false);
+            }
+            lastSpokenSanitized = spokenDisplay;
+          } else {
+            lastSpokenSanitized = spokenDisplay;
+            speechBuffer = "";
+          }
           continue;
         }
 

@@ -51,6 +51,8 @@ SYSTEM_PROMPT = (
     "PART 1 JSON keys: memory_note (string) and thinking_summary (string). "
     "MANDATORY: Output RAW JSON only for Part 1. Do NOT wrap it in markdown block quotes (```json). \n"
     "thinking_summary: a brief, user-safe summary of your reasoning (1-3 bullets).\n"
+    "IMPORTANT: Do not include JSON, memory_note, or thinking_summary in [SPOKEN] or [SILENT].\n"
+    "If formatting is unclear, output an empty JSON line and then only [SPOKEN].\n"
     "\n"
     "PART 2 (Body):\n"
     "Leave a blank line after the JSON, then use these markers:\n"
@@ -481,16 +483,6 @@ def _current_time_context() -> str:
     return f"Current date/time: {iso}"
 
 
-def _format_local_timestamp(value: Optional[float]) -> str:
-    if value is None:
-        return ""
-    try:
-        stamp = datetime.fromtimestamp(float(value)).astimezone()
-    except (TypeError, ValueError, OSError):
-        return ""
-    return stamp.isoformat(timespec="seconds")
-
-
 def _format_recent_messages(
     recent: List[Dict[str, Any]],
 ) -> List[Dict[str, str]]:
@@ -498,9 +490,6 @@ def _format_recent_messages(
     for item in recent:
         role = item.get("role") or "user"
         content = item.get("content") or ""
-        timestamp = _format_local_timestamp(item.get("created_at"))
-        if timestamp:
-            content = f"[{timestamp}] {content}"
         formatted.append({"role": role, "content": content})
     return formatted
 
@@ -837,6 +826,53 @@ def _parse_sections(body: str) -> Tuple[str, str]:
     return spoken_text, silent_text
 
 
+def _strip_json_artifacts(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"^\s*```(?:json)?\s*[\s\S]*?```\s*", "", text, flags=re.I)
+
+    def strip_leading(value: str) -> str:
+        while True:
+            stripped = value.lstrip()
+            if not stripped:
+                return ""
+            line_end = stripped.find("\n")
+            line = stripped if line_end == -1 else stripped[:line_end]
+            line_stripped = line.strip()
+            if not line_stripped:
+                value = stripped[line_end + 1 :] if line_end != -1 else ""
+                continue
+            if line_stripped.startswith("{") and line_stripped.endswith("}"):
+                value = stripped[line_end + 1 :] if line_end != -1 else ""
+                continue
+            if line_stripped.startswith("```"):
+                value = stripped[line_end + 1 :] if line_end != -1 else ""
+                continue
+            if re.search(
+                r"\"(?:memory_note|thinking_summary|assistant_text|speak)\"",
+                line_stripped,
+            ):
+                value = stripped[line_end + 1 :] if line_end != -1 else ""
+                continue
+            if re.search(
+                r"\b(memory_note|thinking_summary|assistant_text|speak)\b",
+                line_stripped,
+            ):
+                value = stripped[line_end + 1 :] if line_end != -1 else ""
+                continue
+            if re.match(
+                r"^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]",
+                line_stripped,
+                re.I,
+            ):
+                value = stripped[line_end + 1 :] if line_end != -1 else ""
+                continue
+            return value
+
+    cleaned = strip_leading(cleaned)
+    return cleaned.strip()
+
+
 def _coerce_response(content: str) -> Dict[str, Any]:
     header, body = _split_header_body(content)
     memory_note = str(header.get("memory_note", "")).strip() if header else ""
@@ -856,6 +892,7 @@ def _coerce_response(content: str) -> Dict[str, Any]:
     if header and ("assistant_text" in header or "speak" in header):
         assistant_text = str(header.get("assistant_text", "")).strip()
         speak = bool(header.get("speak", True))
+        assistant_text = _strip_json_artifacts(assistant_text)
         if speak:
             spoken_text = assistant_text
             # Clean up artifacts if they leaked into the JSON field
@@ -872,6 +909,8 @@ def _coerce_response(content: str) -> Dict[str, Any]:
         }
 
     spoken_text, silent_text = _parse_sections(body)
+    spoken_text = _strip_json_artifacts(spoken_text)
+    silent_text = _strip_json_artifacts(silent_text)
 
     return {
         "spoken_text": spoken_text,
@@ -939,12 +978,8 @@ def chat(request: ChatRequest) -> ChatResponse:
         content = item.get("content")
         if not content:
             continue
-        timestamp = _format_local_timestamp(item.get("created_at"))
         role = item.get("role") or "memory"
-        if timestamp:
-            memory_lines.append(f"[{timestamp}] [{role}] {content}")
-        else:
-            memory_lines.append(f"[{role}] {content}")
+        memory_lines.append(f"[{role}] {content}")
 
     search_query = _decide_search_query(user_text, selected_model, provider)
     search_results = _searxng_search(search_query, SEARXNG_RESULTS)
@@ -1097,12 +1132,8 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         content = item.get("content")
         if not content:
             continue
-        timestamp = _format_local_timestamp(item.get("created_at"))
         role = item.get("role") or "memory"
-        if timestamp:
-            memory_lines.append(f"[{timestamp}] [{role}] {content}")
-        else:
-            memory_lines.append(f"[{role}] {content}")
+        memory_lines.append(f"[{role}] {content}")
 
     search_query = _decide_search_query(user_text, selected_model, provider)
     search_results = _searxng_search(search_query, SEARXNG_RESULTS)
@@ -1323,8 +1354,8 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 for output in drain_buffer(force=True):
                     yield output
 
-            spoken_text = "".join(spoken_chunks).strip()
-            silent_text = "".join(silent_chunks).strip()
+            spoken_text = _strip_json_artifacts("".join(spoken_chunks).strip())
+            silent_text = _strip_json_artifacts("".join(silent_chunks).strip())
 
             if not hidden and user_text != "[Thinking Tick]":
                 store.add_message(
