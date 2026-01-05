@@ -8,6 +8,7 @@ __pycache__/
 *$py.class
 venv/
 .venv/
+.venv-kokoro/
 env/
 python\ 3.12/
 
