@@ -132,12 +132,14 @@ SEARCH_DECIDER_PROMPT = (
 
 SCREENSHOT_DECIDER_PROMPT = (
     "You decide whether a fresh screenshot of the user's screen is required "
-    "to answer the user's request accurately. "
+    "to answer the user's request accurately or improve the response. "
     "Respond with valid JSON only. No other text.\n"
     "Format: {\"request_screenshot\": boolean, \"reason\": string}\n"
     "If no screenshot is needed, use {\"request_screenshot\": false, \"reason\": \"\"}.\n"
     "Request a screenshot when the user asks what is on the screen, to describe UI/visuals, "
-    "or when on-screen content is required to answer."
+    "when on-screen content is required to answer, or when a quick glance would add useful "
+    "context (e.g., debugging UI, verifying layout, or satisfying curiosity). "
+    "Do not over-request; prefer a screenshot only when it will likely improve the response."
 )
 
 
@@ -164,6 +166,7 @@ class ChatResponse(BaseModel):
     provider: str = ""
     request_screenshot: bool = False
     request_reason: str = ""
+    context_debug: str = ""
 
 
 class ModelListResponse(BaseModel):
@@ -476,6 +479,46 @@ def _current_time_context() -> str:
     now = datetime.now().astimezone()
     iso = now.isoformat(timespec="seconds")
     return f"Current date/time: {iso}"
+
+
+def _format_local_timestamp(value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    try:
+        stamp = datetime.fromtimestamp(float(value)).astimezone()
+    except (TypeError, ValueError, OSError):
+        return ""
+    return stamp.isoformat(timespec="seconds")
+
+
+def _format_recent_messages(
+    recent: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    formatted: List[Dict[str, str]] = []
+    for item in recent:
+        role = item.get("role") or "user"
+        content = item.get("content") or ""
+        timestamp = _format_local_timestamp(item.get("created_at"))
+        if timestamp:
+            content = f"[{timestamp}] {content}"
+        formatted.append({"role": role, "content": content})
+    return formatted
+
+
+def _build_context_debug(messages: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for message in messages:
+        role = (message.get("role") or "user").upper()
+        content = message.get("content") or ""
+        images = message.get("images") or []
+        if images:
+            if content:
+                content = f"{content}\n[image attached]"
+            else:
+                content = "[image attached]"
+        entry = f"{role}:\n{content}".strip()
+        lines.append(entry)
+    return "\n\n".join(lines).strip()
 
 
 def _decide_search_query(
@@ -891,9 +934,17 @@ def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
 
     memories = store.search(user_embedding, top_k=4) if user_embedding else []
-    memory_lines = [
-        f"[{item['role']}] {item['content']}" for item in memories if item.get("content")
-    ]
+    memory_lines = []
+    for item in memories:
+        content = item.get("content")
+        if not content:
+            continue
+        timestamp = _format_local_timestamp(item.get("created_at"))
+        role = item.get("role") or "memory"
+        if timestamp:
+            memory_lines.append(f"[{timestamp}] [{role}] {content}")
+        else:
+            memory_lines.append(f"[{role}] {content}")
 
     search_query = _decide_search_query(user_text, selected_model, provider)
     search_results = _searxng_search(search_query, SEARXNG_RESULTS)
@@ -919,7 +970,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         )
         messages.append({"role": "system", "content": memory_block})
 
-    messages.extend(recent)
+    messages.extend(_format_recent_messages(recent))
     if search_block:
         messages.append({"role": "system", "content": search_block})
     prompt_text = user_text or "Please describe the image."
@@ -927,6 +978,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     if has_image:
         user_message["images"] = [image_base64]
     messages.append(user_message)
+    context_debug = _build_context_debug(messages)
 
     try:
         raw_content = _llm_chat(messages, selected_model, provider)
@@ -974,6 +1026,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         search_query=search_query,
         search_results=search_results,
         provider=provider,
+        context_debug=context_debug,
     )
 
 
@@ -1039,9 +1092,17 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     recent = store.get_recent(session_id, limit=8)
 
     memories = store.search(user_embedding, top_k=4) if user_embedding else []
-    memory_lines = [
-        f"[{item['role']}] {item['content']}" for item in memories if item.get("content")
-    ]
+    memory_lines = []
+    for item in memories:
+        content = item.get("content")
+        if not content:
+            continue
+        timestamp = _format_local_timestamp(item.get("created_at"))
+        role = item.get("role") or "memory"
+        if timestamp:
+            memory_lines.append(f"[{timestamp}] [{role}] {content}")
+        else:
+            memory_lines.append(f"[{role}] {content}")
 
     search_query = _decide_search_query(user_text, selected_model, provider)
     search_results = _searxng_search(search_query, SEARXNG_RESULTS)
@@ -1067,7 +1128,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         )
         messages.append({"role": "system", "content": memory_block})
 
-    messages.extend(recent)
+    messages.extend(_format_recent_messages(recent))
     if search_block:
         messages.append({"role": "system", "content": search_block})
     prompt_text = user_text or "Please describe the image."
@@ -1075,6 +1136,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     if has_image:
         user_message["images"] = [image_base64]
     messages.append(user_message)
+    context_debug = _build_context_debug(messages)
 
     def generate() -> Iterable[str]:
         header_parsed = False
@@ -1222,6 +1284,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                         "search_query": search_query,
                         "search_results": search_results,
                         "provider": provider,
+                        "context_debug": context_debug,
                     }
                     yield json.dumps(meta) + "\n"
                     meta_sent = True
@@ -1246,6 +1309,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                     "search_query": search_query,
                     "search_results": search_results,
                     "provider": provider,
+                    "context_debug": context_debug,
                 }
                 yield json.dumps(meta) + "\n"
                 meta_sent = True

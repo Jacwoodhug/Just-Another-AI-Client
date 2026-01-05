@@ -2,7 +2,7 @@ import json
 import math
 import sqlite3
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -56,11 +56,11 @@ class MemoryStore:
                 (session_id, role, content, embedding_json, time.time()),
             )
 
-    def get_recent(self, session_id: str, limit: int = 8) -> List[Dict[str, str]]:
+    def get_recent(self, session_id: str, limit: int = 8) -> List[Dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
                 """
-                SELECT role, content FROM memory
+                SELECT role, content, created_at FROM memory
                 WHERE session_id = ? AND role IN ('user', 'assistant')
                 ORDER BY id DESC
                 LIMIT ?;
@@ -68,22 +68,25 @@ class MemoryStore:
                 (session_id, limit),
             ).fetchall()
         rows.reverse()
-        return [{"role": role, "content": content} for role, content in rows]
+        return [
+            {"role": role, "content": content, "created_at": created_at}
+            for role, content, created_at in rows
+        ]
 
-    def search(self, query_embedding: List[float], top_k: int = 4) -> List[Dict[str, str]]:
+    def search(self, query_embedding: List[float], top_k: int = 4) -> List[Dict[str, Any]]:
         if not query_embedding:
             return []
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
                 """
-                SELECT session_id, role, content, embedding
+                SELECT session_id, role, content, embedding, created_at
                 FROM memory
                 WHERE embedding IS NOT NULL;
                 """
             ).fetchall()
 
         scored: List[Tuple[float, Dict[str, str]]] = []
-        for session_id, role, content, embedding_json in rows:
+        for session_id, role, content, embedding_json, created_at in rows:
             try:
                 embedding = json.loads(embedding_json)
             except json.JSONDecodeError:
@@ -98,6 +101,7 @@ class MemoryStore:
                         "session_id": session_id,
                         "role": role,
                         "content": content,
+                        "created_at": created_at,
                     },
                 )
             )

@@ -36,6 +36,9 @@ const thinkingSilentList = document.getElementById("thinkingSilentList");
 const thinkingMemory = document.getElementById("thinkingMemory");
 const thinkingSearchQuery = document.getElementById("thinkingSearchQuery");
 const thinkingSearchResults = document.getElementById("thinkingSearchResults");
+const thinkingScreenshot = document.getElementById("thinkingScreenshot");
+const thinkingContextToggle = document.getElementById("contextToggle");
+const thinkingContextBody = document.getElementById("thinkingContext");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -67,6 +70,10 @@ let editingSessionId = null;
 let editingSessionDraft = "";
 let screenshotRequestInProgress = false;
 let lastUserPrompt = "";
+let contextDebugText = "";
+let contextVisible = false;
+let pendingScreenshotDataUrl = "";
+let pendingScreenshotLabel = "";
 
 function isSpeechActive() {
   // Check if user is actively speaking (has pending transcript)
@@ -101,6 +108,8 @@ function newSession() {
   chatLog.innerHTML = "";
   updateThinkingPanel("", [], "", []);
   clearThinkingMessages();
+  setThinkingContext("");
+  setThinkingScreenshot("", "");
   clearImage();
   clearChatHistory(newId);
   renderSessionList();
@@ -328,6 +337,8 @@ function switchSession(id) {
   chatLog.innerHTML = "";
   updateThinkingPanel("", [], "", []);
   clearThinkingMessages();
+  setThinkingContext("");
+  setThinkingScreenshot("", "");
   loadChatHistory();
   renderSessionList();
 }
@@ -664,6 +675,8 @@ async function requestScreenshotFromAssistant(options = {}) {
       userLabel: "[Requested screenshot]",
       hidden: true,
       screenshotFollowup: true,
+      contextImageType: "screenshot",
+      contextImageLabel: "Requested screenshot",
     });
   } finally {
     screenshotRequestInProgress = false;
@@ -693,6 +706,8 @@ async function handleIdleCapture() {
     await sendText("", {
       imageBase64,
       userLabel: "[Screen snapshot]",
+      contextImageType: "screenshot",
+      contextImageLabel: "Idle screenshot",
     });
   } finally {
     idleCaptureInProgress = false;
@@ -793,6 +808,8 @@ async function handleIdleCapture() {
     await sendText("", {
       imageBase64,
       userLabel: "[Screen snapshot]",
+      contextImageType: "screenshot",
+      contextImageLabel: "Idle screenshot",
     });
   } finally {
     idleCaptureInProgress = false;
@@ -926,6 +943,70 @@ function updateThinkingPanel(summary, memoryUsed, searchQuery, searchResults) {
       thinkingMemory.appendChild(li);
     }
   }
+}
+
+function setThinkingContext(text) {
+  contextDebugText = text || "";
+  if (!thinkingContextToggle || !thinkingContextBody) {
+    return;
+  }
+  const hasContext = Boolean(contextDebugText);
+  if (!hasContext) {
+    contextVisible = false;
+    thinkingContextBody.textContent = "";
+    thinkingContextBody.hidden = true;
+    thinkingContextToggle.textContent = "Show full context";
+    thinkingContextToggle.disabled = true;
+    return;
+  }
+  thinkingContextToggle.disabled = false;
+  thinkingContextToggle.textContent = contextVisible
+    ? "Hide full context"
+    : "Show full context";
+  if (contextVisible) {
+    thinkingContextBody.textContent = contextDebugText;
+    thinkingContextBody.hidden = false;
+  } else {
+    thinkingContextBody.textContent = "";
+    thinkingContextBody.hidden = true;
+  }
+}
+
+function setThinkingScreenshot(dataUrl, label) {
+  if (!thinkingScreenshot) {
+    return;
+  }
+  thinkingScreenshot.innerHTML = "";
+  if (!dataUrl) {
+    thinkingScreenshot.hidden = true;
+    return;
+  }
+  const img = document.createElement("img");
+  img.src = dataUrl;
+  img.alt = label || "Screenshot used for context";
+  thinkingScreenshot.appendChild(img);
+  if (label) {
+    const caption = document.createElement("div");
+    caption.className = "caption";
+    caption.textContent = label;
+    thinkingScreenshot.appendChild(caption);
+  }
+  thinkingScreenshot.hidden = false;
+}
+
+function setPendingScreenshot(dataUrl, label) {
+  pendingScreenshotDataUrl = dataUrl || "";
+  pendingScreenshotLabel = label || "";
+}
+
+function applyPendingScreenshot() {
+  if (pendingScreenshotDataUrl) {
+    setThinkingScreenshot(pendingScreenshotDataUrl, pendingScreenshotLabel);
+  } else {
+    setThinkingScreenshot("", "");
+  }
+  pendingScreenshotDataUrl = "";
+  pendingScreenshotLabel = "";
 }
 
 function setImagePreview(dataUrl) {
@@ -1118,11 +1199,13 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
   if (data.provider) {
     setProviderBadge(data.provider);
   }
+  setThinkingContext(data.context_debug || "");
   if (data.request_screenshot) {
     await requestScreenshotFromAssistant({
       promptText: sourceText,
       reason: data.request_reason,
     });
+    applyPendingScreenshot();
     return;
   }
 
@@ -1162,6 +1245,7 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
   if (requestedScreenshot) {
     requestScreenshotFromAssistant({ promptText: sourceText });
   }
+  applyPendingScreenshot();
   if (shouldClearAttachment) {
     clearImage();
   }
@@ -1171,11 +1255,24 @@ async function sendText(text, options = {}) {
   const trimmed = (text || "").trim();
   const hidden = Boolean(options.hidden);
   const screenshotFollowup = Boolean(options.screenshotFollowup);
+  const contextImageType = (options.contextImageType || "").toLowerCase();
+  const contextImageLabel = options.contextImageLabel || "";
   const overrideImage = (options.imageBase64 || "").trim();
   const usingAttachment = !overrideImage && attachedImage && attachedImage.base64;
   const imageBase64 = overrideImage || (usingAttachment ? attachedImage.base64 : "");
   if (!trimmed && !imageBase64) {
     return;
+  }
+
+  const imageDataUrl = overrideImage
+    ? `data:image/jpeg;base64,${overrideImage}`
+    : usingAttachment && attachedImage
+      ? attachedImage.dataUrl
+      : "";
+  if (contextImageType === "screenshot" && imageDataUrl) {
+    setPendingScreenshot(imageDataUrl, contextImageLabel || "Screenshot");
+  } else {
+    setPendingScreenshot("", "");
   }
 
   const userLabel =
@@ -1287,6 +1384,7 @@ async function sendText(text, options = {}) {
             ? message.search_results
             : [];
           updateThinkingPanel(lastSummary, lastMemory, searchQuery, searchResults);
+          setThinkingContext(message.context_debug || "");
           silentDraftItem = null;
           silentText = "";
           continue;
@@ -1395,6 +1493,7 @@ async function sendText(text, options = {}) {
               reason: requestReason,
             });
           }
+          applyPendingScreenshot();
         }
       }
     }
@@ -1645,6 +1744,16 @@ if (thinkingClose) {
   thinkingClose.addEventListener("click", () => setThinkingPanelOpen(false));
 }
 
+if (thinkingContextToggle) {
+  thinkingContextToggle.addEventListener("click", () => {
+    if (!contextDebugText) {
+      return;
+    }
+    contextVisible = !contextVisible;
+    setThinkingContext(contextDebugText);
+  });
+}
+
 if (sessionToggle) {
   sessionToggle.addEventListener("click", () => {
     const isOpen =
@@ -1789,6 +1898,8 @@ initRecognition();
 sessionId = loadSession();
 updateThinkingPanel("", [], "", []);
 clearThinkingMessages();
+setThinkingContext("");
+setThinkingScreenshot("", "");
 clearImage();
 currentProvider = normalizeProvider(localStorage.getItem("llmProvider"));
 updateProviderButtons(currentProvider);
