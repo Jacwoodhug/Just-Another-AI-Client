@@ -367,6 +367,15 @@ button.toggle {
   border: 1px solid var(--stroke);
 }
 
+.danger {
+  color: #f08a6c;
+  border-color: rgba(240, 138, 108, 0.6);
+}
+
+.danger:hover {
+  background: rgba(240, 138, 108, 0.12);
+}
+
 .thinking-panel {
   position: sticky;
   top: 32px;

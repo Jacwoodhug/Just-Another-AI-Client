@@ -449,14 +449,59 @@ function renderSessionList() {
         renderSessionList();
       });
 
+      const deleteBtn = document.createElement("button");
+      deleteBtn.type = "button";
+      deleteBtn.className = "small danger ghost";
+      deleteBtn.textContent = "Delete";
+      deleteBtn.addEventListener("click", () => {
+        deleteSession(entry.id);
+      });
+
       actions.appendChild(openBtn);
       actions.appendChild(renameBtn);
+      actions.appendChild(deleteBtn);
     }
 
     item.appendChild(main);
     item.appendChild(actions);
     sessionList.appendChild(item);
   });
+}
+
+function deleteSession(id) {
+  if (!id) {
+    return;
+  }
+  const name = getSessionName(id);
+  const confirmDelete = window.confirm(
+    `Delete session "${name}"? This cannot be undone.`
+  );
+  if (!confirmDelete) {
+    return;
+  }
+
+  const sessions = getSessions().filter((session) => session.id !== id);
+  saveSessions(sessions);
+  clearChatHistory(id);
+
+  if (editingSessionId === id) {
+    editingSessionId = null;
+    editingSessionDraft = "";
+  }
+
+  if (sessionId === id) {
+    if (sessions.length > 0) {
+      const next = sessions.sort(
+        (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
+      )[0];
+      switchSession(next.id);
+    } else {
+      newSession();
+    }
+    return;
+  }
+
+  renderSessionList();
 }
 
 function setSessionPanelOpen(open) {
