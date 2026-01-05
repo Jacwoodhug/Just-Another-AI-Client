@@ -43,6 +43,7 @@ OPENROUTER_FREE_ONLY = os.getenv("OPENROUTER_FREE_ONLY", "true").lower() in (
     "yes",
     "on",
 )
+KOKORO_BASE_URL = os.getenv("KOKORO_BASE_URL", "http://localhost:5005").rstrip("/")
 
 SYSTEM_PROMPT = (
     "You are a voice chat assistant in a web GUI. "
@@ -175,6 +176,17 @@ class ModelListResponse(BaseModel):
     models: List[str]
     default_model: str
     provider: str
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = None
+    speed: Optional[float] = None
+
+
+class TTSVoicesResponse(BaseModel):
+    voices: List[str] = Field(default_factory=list)
+    default_voice: str = ""
 
 
 app = FastAPI(title="Ollama Voice Chat")
@@ -1419,3 +1431,51 @@ def list_models(provider: Optional[str] = None) -> ModelListResponse:
     return ModelListResponse(
         models=models, default_model=OLLAMA_MODEL, provider=selected_provider
     )
+
+
+@app.get("/api/tts/voices", response_model=TTSVoicesResponse)
+def list_tts_voices() -> TTSVoicesResponse:
+    url = f"{KOKORO_BASE_URL}/voices"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Kokoro voices error: {exc}")
+    data = response.json()
+    voices = data.get("voices") if isinstance(data, dict) else []
+    if not isinstance(voices, list):
+        voices = []
+    default_voice = ""
+    if isinstance(data, dict):
+        default_voice = str(data.get("default_voice", "")).strip()
+    return TTSVoicesResponse(voices=voices, default_voice=default_voice)
+
+
+@app.post("/api/tts")
+def tts_proxy(request: TTSRequest) -> StreamingResponse:
+    text = (request.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    payload: Dict[str, Any] = {"text": text}
+    if request.voice:
+        payload["voice"] = request.voice
+    if request.speed:
+        payload["speed"] = request.speed
+    url = f"{KOKORO_BASE_URL}/tts"
+    try:
+        response = requests.post(url, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Kokoro TTS error: {exc}")
+
+    media_type = response.headers.get("Content-Type", "audio/wav").split(";")[0]
+
+    def stream_audio() -> Iterable[bytes]:
+        try:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        finally:
+            response.close()
+
+    return StreamingResponse(stream_audio(), media_type=media_type)

@@ -9,6 +9,7 @@ const voiceSelect = document.getElementById("voiceSelect");
 const voiceTestBtn = document.getElementById("voiceTestBtn");
 const voicePill = document.querySelector(".voice-pill");
 const ttsToggle = document.getElementById("ttsToggle");
+const ttsProviderToggle = document.getElementById("ttsProviderToggle");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const newChatBtn = document.getElementById("newChatBtn");
@@ -65,6 +66,21 @@ const PROVIDER_LABELS = {
 };
 const CHAT_HISTORY_LIMIT = 10;
 let ttsEnabled = true;
+let ttsProvider = "browser";
+const TTS_PROVIDER_LABELS = {
+  browser: "Browser",
+  kokoro: "Kokoro",
+};
+const TTS_PROVIDER_STORAGE_KEY = "ttsProvider";
+const TTS_VOICE_BROWSER_KEY = "ttsVoice";
+const TTS_VOICE_KOKORO_KEY = "ttsVoiceKokoro";
+let kokoroVoices = [];
+let kokoroVoicesLoaded = false;
+let kokoroQueue = [];
+let kokoroPlaying = false;
+let kokoroGeneration = 0;
+let kokoroAbortController = null;
+let kokoroCurrentAudio = null;
 const SESSION_STORAGE_KEY = "chatSessions";
 let editingSessionId = null;
 let editingSessionDraft = "";
@@ -81,7 +97,14 @@ function isSpeechActive() {
     return true;
   }
   // Check if TTS is currently speaking
-  if (window.speechSynthesis && speechSynthesis.speaking) {
+  if (ttsProvider === "browser" && window.speechSynthesis && speechSynthesis.speaking) {
+    return true;
+  }
+  if (
+    ttsProvider === "kokoro" &&
+    kokoroCurrentAudio &&
+    !kokoroCurrentAudio.paused
+  ) {
     return true;
   }
   return false;
@@ -161,23 +184,11 @@ function setTtsEnabled(enabled) {
   if (voiceTestBtn) {
     voiceTestBtn.classList.toggle("tts-hidden", !enabled);
     voiceTestBtn.setAttribute("aria-hidden", String(!enabled));
-    if (!enabled) {
-      voiceTestBtn.disabled = true;
-    }
   }
-  if (voiceSelect) {
-    if (!enabled) {
-      voiceSelect.disabled = true;
-    } else if (window.speechSynthesis) {
-      voiceSelect.disabled = speechSynthesis.getVoices().length === 0;
-    }
-  }
-  if (enabled && voiceTestBtn && window.speechSynthesis) {
-    voiceTestBtn.disabled = speechSynthesis.getVoices().length === 0;
-  }
+  updateTtsControls();
   localStorage.setItem("ttsEnabled", String(enabled));
-  if (!enabled && window.speechSynthesis) {
-    speechSynthesis.cancel();
+  if (!enabled) {
+    stopTtsPlayback();
   }
 }
 
@@ -192,6 +203,36 @@ function normalizeProvider(value) {
 function providerLabel(provider) {
   return PROVIDER_LABELS[provider] || "Local";
 }
+
+function normalizeTtsProvider(value) {
+  const candidate = (value || "").trim().toLowerCase();
+  if (candidate === "kokoro" || candidate === "browser") {
+    return candidate;
+  }
+  return "browser";
+}
+
+function ttsProviderLabel(provider) {
+  return TTS_PROVIDER_LABELS[provider] || "Browser";
+}
+
+function getTtsVoiceStorageKey(provider) {
+  return provider === "kokoro" ? TTS_VOICE_KOKORO_KEY : TTS_VOICE_BROWSER_KEY;
+}
+
+function updateTtsControls() {
+  const hasVoices =
+    ttsProvider === "browser"
+      ? Boolean(window.speechSynthesis && speechSynthesis.getVoices().length)
+      : kokoroVoices.length > 0;
+  if (voiceSelect) {
+    voiceSelect.disabled = !ttsEnabled || !hasVoices;
+  }
+  if (voiceTestBtn) {
+    voiceTestBtn.disabled = !ttsEnabled || !hasVoices;
+  }
+}
+
 
 function getModelStorageKey(provider) {
   return provider === "openrouter" ? "openrouterModel" : "ollamaModel";
@@ -1179,7 +1220,7 @@ function addStatus(text) {
 
 function buildUtterance(text) {
   const utterance = new SpeechSynthesisUtterance(sanitizeTtsText(text));
-  const storedVoice = localStorage.getItem("ttsVoice");
+  const storedVoice = localStorage.getItem(getTtsVoiceStorageKey("browser"));
   if (storedVoice) {
     const voices = speechSynthesis.getVoices();
     const selectedVoice = voices.find((voice) => voice.name === storedVoice);
@@ -1207,10 +1248,14 @@ function sanitizeTtsText(text) {
 }
 
 function speak(text, interrupt = true) {
-  if (!window.speechSynthesis) {
+  if (!ttsEnabled) {
     return;
   }
-  if (!ttsEnabled) {
+  if (ttsProvider === "kokoro") {
+    speakWithKokoro(text, interrupt);
+    return;
+  }
+  if (!window.speechSynthesis) {
     return;
   }
   if (interrupt && speechSynthesis.speaking) {
@@ -1220,13 +1265,171 @@ function speak(text, interrupt = true) {
 }
 
 function queueSpeech(text) {
-  if (!window.speechSynthesis) {
+  speak(text, false);
+}
+
+function stopTtsPlayback() {
+  if (ttsProvider === "kokoro") {
+    stopKokoroPlayback();
     return;
   }
-  if (!ttsEnabled) {
+  if (window.speechSynthesis) {
+    speechSynthesis.cancel();
+  }
+}
+
+function stopKokoroPlayback() {
+  kokoroGeneration += 1;
+  kokoroPlaying = false;
+  if (kokoroAbortController) {
+    kokoroAbortController.abort();
+    kokoroAbortController = null;
+  }
+  clearKokoroQueue();
+  if (kokoroCurrentAudio) {
+    if (kokoroCurrentAudio.src.startsWith("blob:")) {
+      URL.revokeObjectURL(kokoroCurrentAudio.src);
+    }
+    kokoroCurrentAudio.pause();
+    kokoroCurrentAudio.src = "";
+    kokoroCurrentAudio = null;
+  }
+}
+
+function clearKokoroQueue() {
+  kokoroQueue.forEach((item) => {
+    if (item.prefetchController) {
+      item.prefetchController.abort();
+    }
+    if (item.audioUrl) {
+      URL.revokeObjectURL(item.audioUrl);
+    }
+  });
+  kokoroQueue = [];
+}
+
+async function fetchKokoroAudio(text, signal) {
+  const voice = voiceSelect ? voiceSelect.value : "";
+  const payload = { text: sanitizeTtsText(text) };
+  if (voice) {
+    payload.voice = voice;
+  }
+  const response = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    createChatItem(
+      "assistant",
+      `Kokoro TTS error: ${errorText || response.statusText}`,
+      "status"
+    );
+    return "";
+  }
+  const blob = await response.blob();
+  return URL.createObjectURL(blob);
+}
+
+function speakWithKokoro(text, interrupt) {
+  const sanitized = sanitizeTtsText(text);
+  if (!sanitized) {
     return;
   }
-  speechSynthesis.speak(buildUtterance(text));
+  if (interrupt) {
+    stopKokoroPlayback();
+  }
+  kokoroQueue.push({
+    text: sanitized,
+    generation: kokoroGeneration,
+    audioUrl: "",
+    prefetchPromise: null,
+    prefetchController: null,
+  });
+  if (!kokoroPlaying) {
+    playNextKokoro();
+  } else {
+    prefetchNextKokoro();
+  }
+}
+
+function prefetchNextKokoro() {
+  const next = kokoroQueue[0];
+  if (!next || next.audioUrl || next.prefetchPromise) {
+    return;
+  }
+  const controller = new AbortController();
+  next.prefetchController = controller;
+  next.prefetchPromise = fetchKokoroAudio(next.text, controller.signal)
+    .then((url) => {
+      if (next.generation !== kokoroGeneration) {
+        if (url) {
+          URL.revokeObjectURL(url);
+        }
+        return "";
+      }
+      next.audioUrl = url;
+      return url;
+    })
+    .catch(() => "");
+}
+
+async function playNextKokoro() {
+  if (kokoroQueue.length === 0) {
+    kokoroPlaying = false;
+    return;
+  }
+  kokoroPlaying = true;
+  const item = kokoroQueue.shift();
+  if (!item || item.generation !== kokoroGeneration) {
+    playNextKokoro();
+    return;
+  }
+  let audioUrl = "";
+  try {
+    if (item.audioUrl) {
+      audioUrl = item.audioUrl;
+    } else if (item.prefetchPromise) {
+      audioUrl = await item.prefetchPromise;
+    } else {
+      const controller = new AbortController();
+      kokoroAbortController = controller;
+      audioUrl = await fetchKokoroAudio(item.text, controller.signal);
+      kokoroAbortController = null;
+    }
+  } catch (error) {
+    audioUrl = "";
+  }
+  if (!audioUrl || item.generation !== kokoroGeneration) {
+    if (audioUrl) {
+      URL.revokeObjectURL(audioUrl);
+    }
+    playNextKokoro();
+    return;
+  }
+  const audio = new Audio(audioUrl);
+  kokoroCurrentAudio = audio;
+  audio.onended = () => {
+    URL.revokeObjectURL(audioUrl);
+    if (item.generation === kokoroGeneration) {
+      playNextKokoro();
+    }
+  };
+  audio.onerror = () => {
+    URL.revokeObjectURL(audioUrl);
+    if (item.generation === kokoroGeneration) {
+      playNextKokoro();
+    }
+  };
+  audio.play().catch(() => {
+    URL.revokeObjectURL(audioUrl);
+    if (item.generation === kokoroGeneration) {
+      playNextKokoro();
+    }
+  });
+  prefetchNextKokoro();
 }
 
 function flushSpeechBuffer(force) {
@@ -1375,9 +1578,7 @@ async function sendText(text, options = {}) {
     }
     markSpeechActivity();
   }
-  if (window.speechSynthesis && speechSynthesis.speaking) {
-    speechSynthesis.cancel();
-  }
+  stopTtsPlayback();
 
   const payload = { session_id: sessionId };
   if (currentProvider) {
@@ -1736,16 +1937,17 @@ async function loadModels() {
   setProviderBadge(currentProvider);
 }
 
-function populateVoices() {
-  if (!voiceSelect || !window.speechSynthesis) {
+function populateBrowserVoices() {
+  if (!voiceSelect || !window.speechSynthesis || ttsProvider !== "browser") {
     return;
   }
   const voices = speechSynthesis.getVoices();
   if (!voices.length) {
+    updateTtsControls();
     return;
   }
   voiceSelect.innerHTML = "";
-  const storedVoice = localStorage.getItem("ttsVoice");
+  const storedVoice = localStorage.getItem(getTtsVoiceStorageKey("browser"));
   const defaultVoice = voices.find((voice) => voice.default) || voices[0];
   const selectedVoice =
     voices.find((voice) => voice.name === storedVoice) || defaultVoice;
@@ -1759,13 +1961,75 @@ function populateVoices() {
 
   if (selectedVoice) {
     voiceSelect.value = selectedVoice.name;
-    localStorage.setItem("ttsVoice", selectedVoice.name);
+    localStorage.setItem(getTtsVoiceStorageKey("browser"), selectedVoice.name);
   }
-  const isDisabled = !ttsEnabled || voices.length === 0;
-  voiceSelect.disabled = isDisabled;
-  if (voiceTestBtn) {
-    voiceTestBtn.disabled = isDisabled;
+  updateTtsControls();
+}
+
+async function populateKokoroVoices() {
+  if (!voiceSelect || ttsProvider !== "kokoro") {
+    return;
   }
+  voiceSelect.innerHTML = "";
+  voiceSelect.disabled = true;
+  kokoroVoicesLoaded = false;
+  try {
+    const response = await fetch("/api/tts/voices");
+    if (!response.ok) {
+      throw new Error("Kokoro voices unavailable");
+    }
+    const data = await response.json();
+    kokoroVoices = Array.isArray(data.voices) ? data.voices : [];
+    const defaultVoice = data.default_voice || kokoroVoices[0] || "";
+    if (defaultVoice && !kokoroVoices.includes(defaultVoice)) {
+      kokoroVoices.unshift(defaultVoice);
+    }
+    const storedVoice = localStorage.getItem(getTtsVoiceStorageKey("kokoro"));
+    const selectedVoice = kokoroVoices.includes(storedVoice)
+      ? storedVoice
+      : defaultVoice;
+
+    kokoroVoices.forEach((voice) => {
+      const option = document.createElement("option");
+      option.value = voice;
+      option.textContent = voice;
+      voiceSelect.appendChild(option);
+    });
+
+    if (selectedVoice) {
+      voiceSelect.value = selectedVoice;
+      localStorage.setItem(getTtsVoiceStorageKey("kokoro"), selectedVoice);
+    }
+    kokoroVoicesLoaded = true;
+  } catch (error) {
+    kokoroVoices = [];
+    kokoroVoicesLoaded = false;
+  }
+  updateTtsControls();
+}
+
+function loadTtsVoices() {
+  if (ttsProvider === "kokoro") {
+    populateKokoroVoices();
+    return;
+  }
+  populateBrowserVoices();
+}
+
+function setTtsProvider(provider) {
+  ttsProvider = normalizeTtsProvider(provider);
+  localStorage.setItem(TTS_PROVIDER_STORAGE_KEY, ttsProvider);
+  stopTtsPlayback();
+  if (ttsProviderToggle) {
+    ttsProviderToggle.textContent = `TTS: ${ttsProviderLabel(ttsProvider)}`;
+    ttsProviderToggle.dataset.provider = ttsProvider;
+    ttsProviderToggle.setAttribute(
+      "aria-pressed",
+      String(ttsProvider === "kokoro")
+    );
+  }
+  loadTtsVoices();
+  updateTtsControls();
 }
 
 function initVoices() {
@@ -1774,13 +2038,12 @@ function initVoices() {
   }
   voiceSelect.disabled = true;
   voiceTestBtn.disabled = true;
-  if (!window.speechSynthesis) {
-    return;
+  if (window.speechSynthesis) {
+    populateBrowserVoices();
+    speechSynthesis.addEventListener("voiceschanged", populateBrowserVoices);
+    populateBrowserVoices();
   }
-  populateVoices();
-  speechSynthesis.addEventListener("voiceschanged", populateVoices);
-  populateVoices();
-  speechSynthesis.addEventListener("voiceschanged", populateVoices);
+  loadTtsVoices();
 }
 
 const thinkingLoopToggle = document.getElementById("thinkingLoopToggle");
@@ -1903,7 +2166,7 @@ if (modelSelect) {
 if (voiceSelect) {
   voiceSelect.addEventListener("change", () => {
     if (voiceSelect.value) {
-      localStorage.setItem("ttsVoice", voiceSelect.value);
+      localStorage.setItem(getTtsVoiceStorageKey(ttsProvider), voiceSelect.value);
     }
   });
 }
@@ -1917,6 +2180,13 @@ if (voiceTestBtn) {
 if (ttsToggle) {
   ttsToggle.addEventListener("click", () => {
     setTtsEnabled(!ttsEnabled);
+  });
+}
+
+if (ttsProviderToggle) {
+  ttsProviderToggle.addEventListener("click", () => {
+    const next = ttsProvider === "browser" ? "kokoro" : "browser";
+    setTtsProvider(next);
   });
 }
 
@@ -2003,6 +2273,8 @@ currentProvider = normalizeProvider(localStorage.getItem("llmProvider"));
 updateProviderButtons(currentProvider);
 setProviderBadge(currentProvider);
 loadModels();
+ttsProvider = normalizeTtsProvider(localStorage.getItem(TTS_PROVIDER_STORAGE_KEY));
+setTtsProvider(ttsProvider);
 initVoices();
 setScreenStatus("Screen: off");
 const storedIdle = localStorage.getItem("idleCaptureEnabled");

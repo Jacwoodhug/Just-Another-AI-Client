@@ -9,10 +9,26 @@ A local-first voice chat web UI that sends transcribed speech to an Ollama LLM (
 
 ## Basic Run Commands Post Setup
 
-```powershelll
+1. Main Service
+```powershell
 cd .\backend\
 .\.venv\Scripts\activate
 uvicorn app:app --reload
+```
+or
+```powershell
+.run_webui.ps1
+```
+
+2. Kokoro Service
+```powershell
+cd .\backend\
+.\.venv-kokoro\Scripts\activate
+uvicorn kokoro_service:app --host 127.0.0.1 --port 5005
+```
+or
+```powershell
+.run_kokoro.ps1
 ```
 
 ## Setup
@@ -71,6 +87,7 @@ Available variables:
 - `OPENROUTER_APP_NAME` (optional header for OpenRouter)
 - `OPENROUTER_APP_URL` (optional header for OpenRouter)
 - `OPENROUTER_FREE_ONLY` (filter model list to free models, default: `true`)
+- `KOKORO_BASE_URL` (Kokoro TTS service URL, default: `http://localhost:5005`)
 
 ## Using OpenRouter
 1. Set `LLM_PROVIDER=openrouter`.
@@ -78,6 +95,10 @@ Available variables:
 3. Pick a model from the dropdown (free models are shown by default).
 
 Note: embeddings for memory still use Ollama (`OLLAMA_EMBED_MODEL`), so Ollama needs to be available even when chat uses OpenRouter.
+
+## Kokoro TTS (optional)
+Run the Kokoro service in a separate Python 3.11 venv (see `backend/kokoro_service.py`), then toggle the TTS provider in the UI.
+Set `KOKORO_BASE_URL` if you run the service on a different host/port.
 
 ## Behavior notes
 - The mic stays on and only sends text when speech is finalized by the browser.
