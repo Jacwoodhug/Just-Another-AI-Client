@@ -40,6 +40,28 @@ const thinkingSearchResults = document.getElementById("thinkingSearchResults");
 const thinkingScreenshot = document.getElementById("thinkingScreenshot");
 const thinkingContextToggle = document.getElementById("contextToggle");
 const thinkingContextBody = document.getElementById("thinkingContext");
+const settingsBtn = document.getElementById("settingsBtn");
+const settingsBackdrop = document.getElementById("settingsBackdrop");
+const settingsClose = document.getElementById("settingsClose");
+const searchMethodToggle = document.getElementById("searchMethodToggle");
+const personalitySelect = document.getElementById("personalitySelect");
+const sessionNewPersonalityBtn = document.getElementById("sessionNewPersonalityBtn");
+const personalityPicker = document.getElementById("personalityPicker");
+const personalityPickerSelect = document.getElementById("personalityPickerSelect");
+const personalityPickerCreate = document.getElementById("personalityPickerCreate");
+const personalityPickerCancel = document.getElementById("personalityPickerCancel");
+const personalityAddBtn = document.getElementById("personalityAddBtn");
+const personalityList = document.getElementById("personalityList");
+const personalityEditor = document.getElementById("personalityEditor");
+const settingsMain = document.getElementById("settingsMain");
+const personalityEditorTitle = document.getElementById("personalityEditorTitle");
+const peNameInput = document.getElementById("peNameInput");
+const peToneInput = document.getElementById("peToneInput");
+const peTtsProviderToggle = document.getElementById("peTtsProviderToggle");
+const peTtsVoiceSelect = document.getElementById("peTtsVoiceSelect");
+const peSeparateMemory = document.getElementById("peSeparateMemory");
+const peSaveBtn = document.getElementById("peSaveBtn");
+const peCancelBtn = document.getElementById("peCancelBtn");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -82,6 +104,26 @@ let kokoroGeneration = 0;
 let kokoroAbortController = null;
 let kokoroCurrentAudio = null;
 const SESSION_STORAGE_KEY = "chatSessions";
+const SEARCH_METHOD_KEY = "searchMethod";
+let searchMethod = localStorage.getItem(SEARCH_METHOD_KEY) || "searxng";
+const PERSONALITIES_KEY = "personalities";
+const ACTIVE_PERSONALITY_KEY = "activePersonality";
+const DEFAULT_TONE_CONTEXT = `Tone & personality:
+- Conversational, relaxed, human. Mild humor/opinions welcome.
+- Avoid \u201cassistant voice.\u201d Avoid narrating the screen.
+- Spoken responses should usually be 1-2 sentences, sometimes 3.`;
+const DEFAULT_PERSONALITY = {
+  id: "default",
+  name: "Default",
+  toneContext: "",
+  ttsProvider: "browser",
+  ttsVoice: "",
+  separateMemory: false,
+};
+let personalities = [];
+let activePersonalityId = "default";
+let peEditingId = null;  // null = adding new, string = editing existing
+let peTtsProvider = "browser";
 let editingSessionId = null;
 let editingSessionDraft = "";
 let screenshotRequestInProgress = false;
@@ -271,7 +313,7 @@ function saveSessions(sessions) {
   localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
 }
 
-function ensureSessionEntry(id) {
+function ensureSessionEntry(id, personalityId) {
   if (!id) {
     return null;
   }
@@ -285,10 +327,33 @@ function ensureSessionEntry(id) {
       createdAt: now,
       updatedAt: now,
     };
+    if (personalityId) entry.personalityId = personalityId;
     sessions.push(entry);
     saveSessions(sessions);
   }
   return entry;
+}
+
+function getSessionPersonalityId(sessionId) {
+  const sessions = getSessions();
+  const entry = sessions.find((s) => s.id === sessionId);
+  return entry ? (entry.personalityId || null) : null;
+}
+
+function applySessionPersonalityLock(sid) {
+  const lockedId = getSessionPersonalityId(sid);
+  if (lockedId) {
+    const p = personalities.find((x) => x.id === lockedId);
+    if (p) {
+      activePersonalityId = lockedId;
+      localStorage.setItem(ACTIVE_PERSONALITY_KEY, lockedId);
+      applyPersonalityTts(p);
+      renderPersonalitySelect();
+    }
+  }
+  if (personalitySelect) {
+    personalitySelect.disabled = !!lockedId;
+  }
 }
 
 function touchSession(id) {
@@ -371,6 +436,7 @@ function switchSession(id) {
   localStorage.setItem("sessionId", id);
   ensureSessionEntry(id);
   setSessionStatusById(id);
+  applySessionPersonalityLock(id);
   editingSessionId = null;
   editingSessionDraft = "";
   pendingTranscript = "";
@@ -443,6 +509,14 @@ function renderSessionList() {
     meta.className = "session-meta";
     meta.textContent = formatSessionMeta(entry);
     main.appendChild(meta);
+
+    if (entry.personalityId) {
+      const p = personalities.find((x) => x.id === entry.personalityId);
+      const badge = document.createElement("div");
+      badge.className = "session-personality-badge";
+      badge.textContent = p ? `\uD83E\uDDE0 ${p.name}` : "\uD83E\uDDE0 Personality";
+      main.appendChild(badge);
+    }
 
     const actions = document.createElement("div");
     actions.className = "session-item-actions";
@@ -1580,7 +1654,13 @@ async function sendText(text, options = {}) {
   }
   stopTtsPlayback();
 
-  const payload = { session_id: sessionId };
+  const activeP = getActivePersonality();
+  const payload = {
+    session_id: sessionId,
+    search_method: searchMethod,
+    personality_id: activeP.id,
+    tone_context: activeP.toneContext || "",
+  };
   if (currentProvider) {
     payload.provider = currentProvider;
   }
@@ -2115,6 +2195,331 @@ if (thinkingContextToggle) {
   });
 }
 
+// Settings modal
+function updateSearchMethodUI() {
+  if (!searchMethodToggle) return;
+  searchMethodToggle.querySelectorAll(".setting-option").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === searchMethod);
+  });
+}
+
+function openSettings() {
+  if (settingsBackdrop) settingsBackdrop.hidden = false;
+}
+
+function closeSettings() {
+  if (settingsBackdrop) settingsBackdrop.hidden = true;
+}
+
+updateSearchMethodUI();
+
+if (settingsBtn) {
+  settingsBtn.addEventListener("click", openSettings);
+}
+
+if (settingsClose) {
+  settingsClose.addEventListener("click", closeSettings);
+}
+
+if (settingsBackdrop) {
+  settingsBackdrop.addEventListener("click", (e) => {
+    if (e.target === settingsBackdrop) closeSettings();
+  });
+}
+
+if (searchMethodToggle) {
+  searchMethodToggle.addEventListener("click", (e) => {
+    const btn = e.target.closest(".setting-option");
+    if (!btn) return;
+    searchMethod = btn.dataset.value;
+    localStorage.setItem(SEARCH_METHOD_KEY, searchMethod);
+    updateSearchMethodUI();
+  });
+}
+
+// ── Personality system ──────────────────────────────────────────────────────
+
+function loadPersonalities() {
+  try {
+    personalities = JSON.parse(localStorage.getItem(PERSONALITIES_KEY) || "[]");
+  } catch (_) {
+    personalities = [];
+  }
+  if (!personalities.find((p) => p.id === "default")) {
+    personalities.unshift({ ...DEFAULT_PERSONALITY });
+  }
+}
+
+function savePersonalities() {
+  localStorage.setItem(PERSONALITIES_KEY, JSON.stringify(personalities));
+}
+
+function getActivePersonality() {
+  return personalities.find((p) => p.id === activePersonalityId) || personalities[0] || DEFAULT_PERSONALITY;
+}
+
+function applyPersonalityTts(p) {
+  const provider = p.ttsProvider || "browser";
+  if (p.ttsVoice) {
+    // Write to localStorage before setTtsProvider so that populateKokoroVoices
+    // (which reads localStorage after its async fetch) picks up the right voice.
+    localStorage.setItem(getTtsVoiceStorageKey(provider), p.ttsVoice);
+  }
+  setTtsProvider(provider);
+}
+
+function renderPersonalitySelect() {
+  if (!personalitySelect) return;
+  const current = personalitySelect.value || activePersonalityId;
+  personalitySelect.innerHTML = "";
+  personalities.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    personalitySelect.appendChild(opt);
+  });
+  const toSelect = personalities.find((p) => p.id === current) ? current : "default";
+  personalitySelect.value = toSelect;
+}
+
+function renderPersonalityList() {
+  if (!personalityList) return;
+  personalityList.innerHTML = "";
+  if (personalities.length === 0) {
+    personalityList.innerHTML = '<div class="session-empty">No personalities yet.</div>';
+    return;
+  }
+  personalities.forEach((p) => {
+    const card = document.createElement("div");
+    card.className = "personality-card";
+    const nameEl = document.createElement("span");
+    nameEl.className = "personality-card-name";
+    nameEl.textContent = p.name;
+    card.appendChild(nameEl);
+    if (p.id === "default") {
+      const badge = document.createElement("span");
+      badge.className = "personality-card-badge";
+      badge.textContent = "default";
+      card.appendChild(badge);
+    } else {
+      const actions = document.createElement("div");
+      actions.className = "personality-card-actions";
+      const editBtn = document.createElement("button");
+      editBtn.className = "ghost small";
+      editBtn.textContent = "Edit";
+      editBtn.addEventListener("click", () => openPersonalityEditor(p.id));
+      const delBtn = document.createElement("button");
+      delBtn.className = "ghost small danger";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", () => deletePersonality(p.id));
+      actions.appendChild(editBtn);
+      actions.appendChild(delBtn);
+      card.appendChild(actions);
+    }
+    personalityList.appendChild(card);
+  });
+}
+
+function peUpdateTtsProviderUI() {
+  if (!peTtsProviderToggle) return;
+  peTtsProviderToggle.querySelectorAll(".setting-option").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.value === peTtsProvider);
+  });
+  populatePeVoiceSelect();
+}
+
+function populatePeVoiceSelect(selectedVoice) {
+  if (!peTtsVoiceSelect) return;
+  peTtsVoiceSelect.innerHTML = '<option value="">— none —</option>';
+  if (peTtsProvider === "kokoro") {
+    kokoroVoices.forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      peTtsVoiceSelect.appendChild(opt);
+    });
+  } else {
+    const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+    voices.forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = v.name;
+      opt.textContent = v.name;
+      peTtsVoiceSelect.appendChild(opt);
+    });
+  }
+  if (selectedVoice) peTtsVoiceSelect.value = selectedVoice;
+}
+
+function showPersonalityEditor(show) {
+  if (settingsMain) settingsMain.hidden = show;
+  if (personalityEditor) personalityEditor.hidden = !show;
+}
+
+function openPersonalityEditor(id) {
+  peEditingId = id || null;
+  if (id) {
+    const p = personalities.find((x) => x.id === id);
+    if (!p) return;
+    if (personalityEditorTitle) personalityEditorTitle.textContent = "Edit Personality";
+    if (peNameInput) peNameInput.value = p.name;
+    if (peToneInput) peToneInput.value = p.toneContext || DEFAULT_TONE_CONTEXT;
+    peTtsProvider = p.ttsProvider || "browser";
+    peUpdateTtsProviderUI();
+    populatePeVoiceSelect(p.ttsVoice || "");
+    if (peSeparateMemory) peSeparateMemory.checked = !!p.separateMemory;
+  } else {
+    if (personalityEditorTitle) personalityEditorTitle.textContent = "New Personality";
+    if (peNameInput) peNameInput.value = "";
+    if (peToneInput) peToneInput.value = DEFAULT_TONE_CONTEXT;
+    peTtsProvider = "browser";
+    peUpdateTtsProviderUI();
+    populatePeVoiceSelect("");
+    if (peSeparateMemory) peSeparateMemory.checked = false;
+  }
+  showPersonalityEditor(true);
+}
+
+function savePersonalityEditor() {
+  const name = peNameInput ? peNameInput.value.trim() : "";
+  if (!name) {
+    if (peNameInput) peNameInput.focus();
+    return;
+  }
+  const toneContext = peToneInput ? peToneInput.value.trim() : "";
+  const ttsVoice = peTtsVoiceSelect ? peTtsVoiceSelect.value : "";
+  const separateMemory = peSeparateMemory ? peSeparateMemory.checked : false;
+
+  if (peEditingId) {
+    const idx = personalities.findIndex((p) => p.id === peEditingId);
+    if (idx !== -1) {
+      personalities[idx] = { ...personalities[idx], name, toneContext, ttsProvider: peTtsProvider, ttsVoice, separateMemory };
+    }
+  } else {
+    personalities.push({
+      id: crypto.randomUUID(),
+      name,
+      toneContext,
+      ttsProvider: peTtsProvider,
+      ttsVoice,
+      separateMemory,
+    });
+  }
+  savePersonalities();
+  renderPersonalityList();
+  renderPersonalitySelect();
+  showPersonalityEditor(false);
+}
+
+async function deletePersonality(id) {
+  const p = personalities.find((x) => x.id === id);
+  if (!p || p.id === "default") return;
+  if (!confirm(`Delete personality "${p.name}"? This cannot be undone.`)) return;
+  try {
+    await fetch(`/api/personality/${encodeURIComponent(id)}/memory`, { method: "DELETE" });
+  } catch (_) {}
+  personalities = personalities.filter((x) => x.id !== id);
+  if (activePersonalityId === id) {
+    activePersonalityId = "default";
+    localStorage.setItem(ACTIVE_PERSONALITY_KEY, activePersonalityId);
+    applyPersonalityTts(getActivePersonality());
+  }
+  savePersonalities();
+  renderPersonalityList();
+  renderPersonalitySelect();
+}
+
+// Init personalities
+loadPersonalities();
+activePersonalityId = localStorage.getItem(ACTIVE_PERSONALITY_KEY) || "default";
+if (!personalities.find((p) => p.id === activePersonalityId)) {
+  activePersonalityId = "default";
+}
+renderPersonalitySelect();
+renderPersonalityList();
+
+if (personalitySelect) {
+  personalitySelect.addEventListener("change", () => {
+    activePersonalityId = personalitySelect.value;
+    localStorage.setItem(ACTIVE_PERSONALITY_KEY, activePersonalityId);
+    applyPersonalityTts(getActivePersonality());
+  });
+}
+
+if (personalityAddBtn) {
+  personalityAddBtn.addEventListener("click", () => openPersonalityEditor(null));
+}
+
+if (peSaveBtn) {
+  peSaveBtn.addEventListener("click", savePersonalityEditor);
+}
+
+if (peCancelBtn) {
+  peCancelBtn.addEventListener("click", () => showPersonalityEditor(false));
+}
+
+if (peTtsProviderToggle) {
+  peTtsProviderToggle.addEventListener("click", (e) => {
+    const btn = e.target.closest(".setting-option");
+    if (!btn) return;
+    peTtsProvider = btn.dataset.value;
+    peUpdateTtsProviderUI();
+  });
+}
+
+// Personality session picker
+function openPersonalityPicker() {
+  if (!personalityPickerSelect) return;
+  personalityPickerSelect.innerHTML = "";
+  personalities.forEach((p) => {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    personalityPickerSelect.appendChild(opt);
+  });
+  if (personalityPicker) personalityPicker.hidden = false;
+}
+
+function closePersonalityPicker() {
+  if (personalityPicker) personalityPicker.hidden = true;
+}
+
+if (sessionNewPersonalityBtn) {
+  sessionNewPersonalityBtn.addEventListener("click", openPersonalityPicker);
+}
+
+if (personalityPickerCancel) {
+  personalityPickerCancel.addEventListener("click", closePersonalityPicker);
+}
+
+if (personalityPickerCreate) {
+  personalityPickerCreate.addEventListener("click", () => {
+    const chosenId = personalityPickerSelect ? personalityPickerSelect.value : null;
+    if (!chosenId) return;
+    closePersonalityPicker();
+    const newId = crypto.randomUUID();
+    sessionId = newId;
+    localStorage.setItem("sessionId", newId);
+    const p = personalities.find((x) => x.id === chosenId);
+    const sessionName = p ? `${p.name} session` : "Personality session";
+    const now = Date.now();
+    const sessions = getSessions();
+    sessions.push({ id: newId, name: sessionName, personalityId: chosenId, createdAt: now, updatedAt: now });
+    saveSessions(sessions);
+    setSessionStatusById(newId);
+    editingSessionId = null;
+    editingSessionDraft = "";
+    chatLog.innerHTML = "";
+    updateThinkingPanel("", [], "", []);
+    clearThinkingMessages();
+    setThinkingContext("");
+    setThinkingScreenshot("", "");
+    clearChatHistory(newId);
+    applySessionPersonalityLock(newId);
+    renderSessionList();
+    setSessionPanelOpen(true);
+  });
+}
+
 if (sessionToggle) {
   sessionToggle.addEventListener("click", () => {
     const isOpen =
@@ -2264,6 +2669,7 @@ setSessionPanelOpen(storedSessionPanelState === "true");
 
 initRecognition();
 sessionId = loadSession();
+applySessionPersonalityLock(sessionId);
 updateThinkingPanel("", [], "", []);
 clearThinkingMessages();
 setThinkingContext("");
@@ -2276,6 +2682,8 @@ loadModels();
 ttsProvider = normalizeTtsProvider(localStorage.getItem(TTS_PROVIDER_STORAGE_KEY));
 setTtsProvider(ttsProvider);
 initVoices();
+// Apply active personality TTS after voices are initialized
+setTimeout(() => applyPersonalityTts(getActivePersonality()), 600);
 setScreenStatus("Screen: off");
 const storedIdle = localStorage.getItem("idleCaptureEnabled");
 setIdleCaptureEnabled(storedIdle === "true");

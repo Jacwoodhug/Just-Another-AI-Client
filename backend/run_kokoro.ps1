@@ -4,7 +4,7 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptRoot
 
 $venvPath = Join-Path $scriptRoot ".venv-kokoro"
-$pythonPath = Join-Path $venvPath "Scripts\\python.exe"
+$pythonPath = Join-Path $venvPath "Scripts\python.exe"
 
 if (-not (Test-Path $pythonPath)) {
   Write-Host "Kokoro venv not found at $venvPath."

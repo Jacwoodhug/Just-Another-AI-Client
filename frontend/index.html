@@ -27,6 +27,17 @@
       </div>
       <div class="session-actions">
         <button class="small" id="sessionNewBtn" type="button">New session</button>
+        <button class="small ghost" id="sessionNewPersonalityBtn" type="button">Personality session</button>
+      </div>
+
+      <!-- Personality session picker -->
+      <div class="personality-picker" id="personalityPicker" hidden>
+        <label class="personality-picker-label">Lock to personality</label>
+        <select id="personalityPickerSelect"></select>
+        <div class="personality-picker-actions">
+          <button class="primary small" id="personalityPickerCreate" type="button">Create</button>
+          <button class="ghost small" id="personalityPickerCancel" type="button">Cancel</button>
+        </div>
       </div>
       <div class="session-list" id="sessionList">
         <div class="session-empty">No sessions yet.</div>
@@ -57,6 +68,10 @@
           <label class="pill model-pill">
             <span>Model</span>
             <select id="modelSelect"></select>
+          </label>
+          <label class="pill personality-pill">
+            <span>Personality</span>
+            <select id="personalitySelect"></select>
           </label>
         </div>
         <div class="status-row">
@@ -158,6 +173,65 @@
       </div>
     </aside>
   </div>
+
+  <!-- Settings modal -->
+  <div class="modal-backdrop" id="settingsBackdrop" hidden>
+    <div class="modal" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings">
+      <div class="modal-header">
+        <h3>Settings</h3>
+        <button class="ghost" id="settingsClose" type="button">Close</button>
+      </div>
+      <div class="modal-body" id="settingsMain">
+        <div class="setting-row">
+          <label class="setting-label">Search Method</label>
+          <div class="setting-toggle" id="searchMethodToggle" role="group" aria-label="Search method">
+            <button class="setting-option" type="button" data-value="searxng">SearXNG</button>
+            <button class="setting-option" type="button" data-value="brave">Brave</button>
+            <button class="setting-option" type="button" data-value="none">None</button>
+          </div>
+        </div>
+        <div class="setting-section">
+          <div class="setting-section-header">
+            <span class="setting-label">Personalities</span>
+            <button class="small" id="personalityAddBtn" type="button">Add</button>
+          </div>
+          <div id="personalityList"></div>
+        </div>
+      </div>
+      <div class="modal-body" id="personalityEditor" hidden>
+        <div class="setting-section-header" style="margin-bottom:16px">
+          <span class="setting-label" id="personalityEditorTitle">Edit Personality</span>
+          <button class="ghost small" id="peCancelBtn" type="button">Cancel</button>
+        </div>
+        <div class="personality-editor-fields">
+          <label class="personality-field-label">Name
+            <input id="peNameInput" type="text" placeholder="e.g. Chill Mode" />
+          </label>
+          <label class="personality-field-label">Tone Context
+            <textarea id="peToneInput" rows="6" placeholder="Describe tone and personality..."></textarea>
+          </label>
+          <div class="personality-field-label">TTS Provider
+            <div class="setting-toggle" id="peTtsProviderToggle" role="group" aria-label="TTS provider">
+              <button class="setting-option" type="button" data-value="browser">Browser</button>
+              <button class="setting-option" type="button" data-value="kokoro">Kokoro</button>
+            </div>
+          </div>
+          <label class="personality-field-label">TTS Voice
+            <select id="peTtsVoiceSelect"></select>
+          </label>
+          <label class="personality-field-label checkbox-label">
+            <input id="peSeparateMemory" type="checkbox" />
+            Separate memory
+          </label>
+        </div>
+        <div class="personality-editor-actions">
+          <button class="primary small" id="peSaveBtn" type="button">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button class="settings-btn" id="settingsBtn" type="button" aria-label="Settings">&#9881;</button>
 
   <script src="/static/app.js"></script>
 </body>

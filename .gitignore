@@ -13,9 +13,9 @@ env/
 python\ 3.12/
 
 # DB
-backend/memory.sqlite3
-
+backend/*.sqlite3
 
 # IDEs
 .vscode/
 .idea/
+.claude/
