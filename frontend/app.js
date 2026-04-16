@@ -32,12 +32,10 @@ const providerToggle = document.getElementById("providerToggle");
 const thinkingToggle = document.getElementById("thinkingToggle");
 const thinkingPanel = document.getElementById("thinkingPanel");
 const thinkingClose = document.getElementById("thinkingClose");
-const thinkingSummary = document.getElementById("thinkingSummary");
 const thinkingSilentList = document.getElementById("thinkingSilentList");
-const thinkingMemory = document.getElementById("thinkingMemory");
-const thinkingSearchQuery = document.getElementById("thinkingSearchQuery");
-const thinkingSearchResults = document.getElementById("thinkingSearchResults");
+const thinkingToolCalls = document.getElementById("thinkingToolCalls");
 const thinkingScreenshot = document.getElementById("thinkingScreenshot");
+const thinkingTokenEstimate = document.getElementById("thinkingTokenEstimate");
 const thinkingContextToggle = document.getElementById("contextToggle");
 const thinkingContextBody = document.getElementById("thinkingContext");
 const settingsBtn = document.getElementById("settingsBtn");
@@ -171,7 +169,7 @@ function newSession() {
   editingSessionId = null;
   editingSessionDraft = "";
   chatLog.innerHTML = "";
-  updateThinkingPanel("", [], "", []);
+  updateThinkingPanel([]);
   clearThinkingMessages();
   setThinkingContext("");
   setThinkingScreenshot("", "");
@@ -442,7 +440,7 @@ function switchSession(id) {
   pendingTranscript = "";
   interimText.textContent = "...";
   chatLog.innerHTML = "";
-  updateThinkingPanel("", [], "", []);
+  updateThinkingPanel([]);
   clearThinkingMessages();
   setThinkingContext("");
   setThinkingScreenshot("", "");
@@ -806,47 +804,6 @@ function stripScreenshotRequest(text) {
   return { cleaned, requested: true };
 }
 
-function stripJsonArtifacts(text, options = {}) {
-  if (!text) {
-    return "";
-  }
-  const trimEdges = options.trimEdges !== false;
-  let cleaned = text.replace(/^\s*```(?:json)?[\s\S]*?```\s*/i, "");
-  while (true) {
-    const firstNonWhitespace = cleaned.search(/\S/);
-    if (firstNonWhitespace === -1) {
-      return trimEdges ? cleaned.trim() : cleaned;
-    }
-    const lineEnd = cleaned.indexOf("\n", firstNonWhitespace);
-    const line =
-      lineEnd === -1
-        ? cleaned.slice(firstNonWhitespace)
-        : cleaned.slice(firstNonWhitespace, lineEnd);
-    const lineStripped = line.trim();
-    const looksLikeJson =
-      lineStripped.startsWith("{") && lineStripped.endsWith("}");
-    const hasHeaderKeys = /"(memory_note|thinking_summary|assistant_text|speak)"/.test(
-      lineStripped
-    );
-    const hasHeaderPrefix = /^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]/i.test(
-      lineStripped
-    );
-    if (!lineStripped) {
-      return trimEdges ? cleaned.trim() : cleaned;
-    }
-    if (
-      !looksLikeJson &&
-      !hasHeaderKeys &&
-      !hasHeaderPrefix &&
-      !lineStripped.startsWith("```")
-    ) {
-      return trimEdges ? cleaned.trim() : cleaned;
-    }
-    const removeEnd = lineEnd === -1 ? cleaned.length : lineEnd + 1;
-    cleaned = cleaned.slice(removeEnd);
-  }
-}
-
 async function requestScreenshotFromAssistant(options = {}) {
   if (screenshotRequestInProgress) {
     return;
@@ -1092,58 +1049,33 @@ function addThinkingMessage(text, allowEmpty = false) {
   return item;
 }
 
-function updateThinkingPanel(summary, memoryUsed, searchQuery, searchResults) {
-  if (thinkingSummary) {
-    thinkingSummary.textContent = summary || "No summary yet.";
-  }
-  if (thinkingSearchQuery) {
-    thinkingSearchQuery.textContent = searchQuery
-      ? `Query: ${searchQuery}`
-      : "No search yet.";
-  }
-  if (thinkingSearchResults) {
-    thinkingSearchResults.innerHTML = "";
-    if (Array.isArray(searchResults) && searchResults.length > 0) {
-      searchResults.forEach((item) => {
+function updateThinkingPanel(toolCallsMade) {
+  if (thinkingToolCalls) {
+    thinkingToolCalls.innerHTML = "";
+    if (Array.isArray(toolCallsMade) && toolCallsMade.length > 0) {
+      toolCallsMade.forEach((call) => {
         const li = document.createElement("li");
-        const title = item.title || item.url || "Result";
-        if (item.url) {
-          const link = document.createElement("a");
-          link.href = item.url;
-          link.textContent = title;
-          link.target = "_blank";
-          link.rel = "noreferrer";
-          li.appendChild(link);
-        } else {
-          li.textContent = title;
-        }
-        if (item.snippet) {
-          const snippet = document.createElement("div");
-          snippet.textContent = item.snippet;
-          li.appendChild(snippet);
-        }
-        thinkingSearchResults.appendChild(li);
+        const name = call.tool || call.name || "unknown";
+        const args = call.arguments || call.args || {};
+        const summary = Object.entries(args)
+          .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+          .join(", ");
+        li.textContent = summary ? `${name}(${summary})` : name;
+        thinkingToolCalls.appendChild(li);
       });
     } else {
       const li = document.createElement("li");
-      li.textContent = "No results.";
-      thinkingSearchResults.appendChild(li);
+      li.textContent = "No tools used.";
+      thinkingToolCalls.appendChild(li);
     }
   }
-  if (thinkingMemory) {
-    thinkingMemory.innerHTML = "";
-    if (Array.isArray(memoryUsed) && memoryUsed.length > 0) {
-      memoryUsed.forEach((item) => {
-        const li = document.createElement("li");
-        li.textContent = item;
-        thinkingMemory.appendChild(li);
-      });
-    } else {
-      const li = document.createElement("li");
-      li.textContent = "No memory used.";
-      thinkingMemory.appendChild(li);
-    }
-  }
+}
+
+function updateThinkingTokenEstimate(contextDebug) {
+  if (!thinkingTokenEstimate) return;
+  const text = contextDebug || "";
+  const estimate = text ? Math.round(text.length / 4) : 0;
+  thinkingTokenEstimate.textContent = `~${estimate.toLocaleString()} tokens`;
 }
 
 function setThinkingContext(text) {
@@ -1203,11 +1135,9 @@ function setPendingScreenshot(dataUrl, label) {
 function applyPendingScreenshot() {
   if (pendingScreenshotDataUrl) {
     setThinkingScreenshot(pendingScreenshotDataUrl, pendingScreenshotLabel);
-  } else {
-    setThinkingScreenshot("", "");
+    pendingScreenshotDataUrl = "";
+    pendingScreenshotLabel = "";
   }
-  pendingScreenshotDataUrl = "";
-  pendingScreenshotLabel = "";
 }
 
 function setImagePreview(dataUrl) {
@@ -1568,24 +1498,16 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
       promptText: sourceText,
       reason: data.request_reason,
     });
-    applyPendingScreenshot();
     return;
   }
 
-  const summary = data.thinking_summary;
-  const memoryUsed = Array.isArray(data.memory_used) ? data.memory_used : [];
-  const searchQuery = data.search_query || "";
-  const searchResults = Array.isArray(data.search_results)
-    ? data.search_results
-    : [];
+  const toolCallsMade = Array.isArray(data.tool_calls_made) ? data.tool_calls_made : [];
   let spokenText = data.assistant_text || "";
   let silentText = data.silent_text || "";
   const spokenRequest = stripScreenshotRequest(spokenText);
   const silentRequest = stripScreenshotRequest(silentText);
   spokenText = spokenRequest.cleaned;
   silentText = silentRequest.cleaned;
-  spokenText = stripJsonArtifacts(spokenText);
-  silentText = stripJsonArtifacts(silentText);
   const requestedScreenshot = spokenRequest.requested || silentRequest.requested;
 
   if (spokenText) {
@@ -1598,7 +1520,8 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
     addThinkingMessage("Assistant chose to stay silent.");
   }
 
-  updateThinkingPanel(summary, searchQuery, searchResults, memoryUsed);
+  updateThinkingPanel(toolCallsMade);
+  updateThinkingTokenEstimate(data.context_debug || "");
   // Double requestAnimationFrame ensures scroll happens after layout is complete
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -1606,7 +1529,6 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
     });
   });
 
-  updateThinkingPanel(summary, memoryUsed, searchQuery, searchResults);
   if (requestedScreenshot) {
     requestScreenshotFromAssistant({ promptText: sourceText });
   }
@@ -1701,8 +1623,6 @@ async function sendText(text, options = {}) {
     let spokenText = "";
     let silentText = "";
     let receivedMeta = false;
-    let lastSummary = "";
-    let lastMemory = [];
     let streamHadError = false;
     speechBuffer = "";
     let requestedScreenshot = false;
@@ -1745,16 +1665,12 @@ async function sendText(text, options = {}) {
           if (message.provider) {
             setProviderBadge(message.provider);
           }
-          lastSummary = message.thinking_summary || "";
-          lastMemory = Array.isArray(message.memory_used)
-            ? message.memory_used
+          const toolCalls = Array.isArray(message.tool_calls_made)
+            ? message.tool_calls_made
             : [];
-          const searchQuery = message.search_query || "";
-          const searchResults = Array.isArray(message.search_results)
-            ? message.search_results
-            : [];
-          updateThinkingPanel(lastSummary, lastMemory, searchQuery, searchResults);
+          updateThinkingPanel(toolCalls);
           setThinkingContext(message.context_debug || "");
+          updateThinkingTokenEstimate(message.context_debug || "");
           silentDraftItem = null;
           silentText = "";
           continue;
@@ -1785,7 +1701,6 @@ async function sendText(text, options = {}) {
             if (screenshotRequest.requested) {
               requestedScreenshot = true;
             }
-            silentText = stripJsonArtifacts(silentText, { trimEdges: false });
             if (!silentDraftItem) {
               silentDraftItem = addThinkingMessage("", true);
             }
@@ -1805,7 +1720,6 @@ async function sendText(text, options = {}) {
           if (spokenRequest.requested) {
             requestedScreenshot = true;
           }
-          spokenText = stripJsonArtifacts(spokenText, { trimEdges: false });
           if (!assistantItem) {
             assistantItem = createChatItem("assistant", "");
           }
@@ -1867,7 +1781,7 @@ async function sendText(text, options = {}) {
             clearImage();
           }
           if (requestedScreenshot) {
-            requestScreenshotFromAssistant({
+            await requestScreenshotFromAssistant({
               promptText: trimmed,
               reason: requestReason,
             });
@@ -2509,7 +2423,7 @@ if (personalityPickerCreate) {
     editingSessionId = null;
     editingSessionDraft = "";
     chatLog.innerHTML = "";
-    updateThinkingPanel("", [], "", []);
+    updateThinkingPanel([]);
     clearThinkingMessages();
     setThinkingContext("");
     setThinkingScreenshot("", "");
@@ -2670,7 +2584,7 @@ setSessionPanelOpen(storedSessionPanelState === "true");
 initRecognition();
 sessionId = loadSession();
 applySessionPersonalityLock(sessionId);
-updateThinkingPanel("", [], "", []);
+updateThinkingPanel([]);
 clearThinkingMessages();
 setThinkingContext("");
 setThinkingScreenshot("", "");

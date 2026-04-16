@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from memory_store import MemoryStore
+from yaml_memory_store import YamlMemoryStore
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
@@ -48,20 +49,26 @@ KOKORO_BASE_URL = os.getenv("KOKORO_BASE_URL", "http://localhost:5005").rstrip("
 
 _SYSTEM_PROMPT_PRE_TONE = (
     "You are a voice chat assistant in a web GUI. "
-    "You can choose to respond or stay silent. "
-    "Return two parts. PART 1: A single line of raw JSON object. PART 2: The body.\n"
-    "PART 1 JSON keys: memory_note (string) and thinking_summary (string). "
-    "MANDATORY: Output RAW JSON only for Part 1. Do NOT wrap it in markdown block quotes (```json). \n"
-    "thinking_summary: a brief, user-safe summary of your reasoning (1-3 bullets).\n"
-    "IMPORTANT: Do not include JSON, memory_note, or thinking_summary in [SPOKEN] or [SILENT].\n"
-    "If formatting is unclear, output an empty JSON line and then only [SPOKEN].\n"
+    "You can choose to respond or stay silent.\n"
     "\n"
-    "PART 2 (Body):\n"
-    "Leave a blank line after the JSON, then use these markers:\n"
-    "[SPOKEN] followed by the spoken response text.\n"
-    "[SILENT] followed by the silent response text (shown in Thinking panel, never spoken).\n"
-    "If web search results are provided, use them to answer. Do not cite URLs unless explicitly asked.\n"
-    "memory_note: a short, durable fact worth remembering (or empty).\n"
+    "RESPONSE FORMAT:\n"
+    "Structure your response with these section markers on their own line:\n"
+    "[SPOKEN]\n"
+    "The spoken response text here.\n"
+    "[SILENT]\n"
+    "The silent/thinking text here (shown in Thinking panel, never spoken).\n"
+    "Always put each marker on its own line before the content for that section.\n"
+    "\n"
+    "TOOLS:\n"
+    "You have access to tools. Use them when appropriate:\n"
+    "- webSearch: search the web when you need current information, facts, or anything you're unsure about.\n"
+    "- requestScreenshot: request a screenshot when you need to see what's on the user's screen.\n"
+    "- memoryStore: store a durable fact about the user (preferences, habits, long-term info). Not for transient moods.\n"
+    "  When the user says 'remember this', 'remember that', 'don't forget', 'keep in mind', or similar, ALWAYS use memoryStore to save the relevant fact.\n"
+    "  Also use memoryStore proactively when the user reveals a preference, habit, or important personal detail worth retaining.\n"
+    "- memoryEdit: update an existing memory entry by id.\n"
+    "- memoryDelete: remove a memory entry by id.\n"
+    "If web search results are provided via tool response, use them to answer. Do not cite URLs unless explicitly asked.\n"
     "\n"
     "BEHAVIORAL GUIDELINES:\n"
     "You are an ambient, voice-first companion with visual awareness of the user's screen and access to memory. Your primary interaction channel is spoken conversation. Screenshots provide passive context, not obligations to respond.\n"
@@ -124,9 +131,6 @@ _SYSTEM_PROMPT_POST_TONE = (
     "- Private observations, tentative interpretations, contextual notes.\n"
     "- Do not leak reasoning into [SPOKEN].\n"
     "\n"
-    "Memory behavior:\n"
-    "- Use memory_note only for durable preferences, habits, or long-term facts. No transient moods.\n"
-    "\n"
     "Self-regulation:\n"
     "- If you spoke very recently, raise the bar before speaking again unless the user speaks.\n"
     "- User speech always lowers the bar to respond."
@@ -136,26 +140,96 @@ _SYSTEM_PROMPT_POST_TONE = (
 def build_system_prompt(tone_context=None):
     tone = (tone_context or "").strip() or DEFAULT_TONE_CONTEXT
     return _SYSTEM_PROMPT_PRE_TONE + tone + _SYSTEM_PROMPT_POST_TONE
-SEARCH_DECIDER_PROMPT = (
-    "You are a search query generator. "
-    "Decide if a web search is required to answer the user's request accurately. "
-    "You MUST respond with valid JSON only. No other text.\n"
-    "Format: {\"use_search\": boolean, \"search_query\": string}\n"
-    "Example: {\"use_search\": true, \"search_query\": \"latest nvidia driver\"}\n"
-    "If no search is needed, use {\"use_search\": false, \"search_query\": \"\"}."
-)
 
-SCREENSHOT_DECIDER_PROMPT = (
-    "You decide whether a fresh screenshot of the user's screen is required "
-    "to answer the user's request accurately or improve the response. "
-    "Respond with valid JSON only. No other text.\n"
-    "Format: {\"request_screenshot\": boolean, \"reason\": string}\n"
-    "If no screenshot is needed, use {\"request_screenshot\": false, \"reason\": \"\"}.\n"
-    "Request a screenshot when the user asks what is on the screen, to describe UI/visuals, "
-    "when on-screen content is required to answer, or when a quick glance would add useful "
-    "context (e.g., debugging UI, verifying layout, or satisfying curiosity). "
-    "Do not over-request; prefer a screenshot only when it will likely improve the response."
-)
+
+# ── Tool definitions (Ollama / OpenAI function-calling format) ────────────
+
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "webSearch",
+            "description": "Search the web for current information. Use when you need facts, news, or anything you are unsure about.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "requestScreenshot",
+            "description": "Request a screenshot of the user's screen. Use when you need to see what the user is looking at.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memoryStore",
+            "description": "Store a durable fact about the user (preferences, habits, long-term info). Not for transient moods.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The fact to remember.",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memoryEdit",
+            "description": "Edit an existing memory entry by its id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "The memory entry id.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The updated content.",
+                    },
+                },
+                "required": ["id", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "memoryDelete",
+            "description": "Delete a memory entry by its id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "The memory entry id to delete.",
+                    },
+                },
+                "required": ["id"],
+            },
+        },
+    },
+]
 
 
 
@@ -177,10 +251,7 @@ class ChatResponse(BaseModel):
     assistant_text: str
     silent_text: str
     speak: bool
-    memory_used: List[str] = Field(default_factory=list)
-    thinking_summary: str = ""
-    search_query: str = ""
-    search_results: List[Dict[str, str]] = Field(default_factory=list)
+    tool_calls_made: List[Dict[str, Any]] = Field(default_factory=list)
     provider: str = ""
     request_screenshot: bool = False
     request_reason: str = ""
@@ -208,6 +279,9 @@ app = FastAPI(title="Ollama Voice Chat")
 store = MemoryStore(str(DB_PATH))
 _personality_stores: Dict[str, MemoryStore] = {}
 
+yaml_store = YamlMemoryStore(BASE_DIR / "memories.yaml")
+_personality_yaml_stores: Dict[str, YamlMemoryStore] = {}
+
 
 def _get_store(personality_id: Optional[str]) -> MemoryStore:
     if not personality_id or personality_id == "default":
@@ -216,6 +290,15 @@ def _get_store(personality_id: Optional[str]) -> MemoryStore:
         db_path = BASE_DIR / f"memory_{personality_id}.sqlite3"
         _personality_stores[personality_id] = MemoryStore(str(db_path))
     return _personality_stores[personality_id]
+
+
+def _get_yaml_store(personality_id: Optional[str]) -> YamlMemoryStore:
+    if not personality_id or personality_id == "default":
+        return yaml_store
+    if personality_id not in _personality_yaml_stores:
+        yaml_path = BASE_DIR / f"memories_{personality_id}.yaml"
+        _personality_yaml_stores[personality_id] = YamlMemoryStore(yaml_path)
+    return _personality_yaml_stores[personality_id]
 
 
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
@@ -583,49 +666,250 @@ def _build_context_debug(messages: List[Dict[str, Any]]) -> str:
     return "\n\n".join(lines).strip()
 
 
-def _decide_search_query(
-    user_text: str, model: str, provider: Optional[str] = None
-) -> str:
-    if not user_text:
+def _time_since_last_message_context(recent: List[Dict[str, Any]]) -> str:
+    if not recent:
         return ""
-    messages = [
-        {"role": "system", "content": SEARCH_DECIDER_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
-    try:
-        content = _llm_chat(messages, model, provider)
-        print(f"DEBUG: Search decider raw content: {content!r}")
-    except (requests.RequestException, RuntimeError) as exc:
-        print(f"DEBUG: Search decider error: {exc}")
+    import time as _time
+    last = recent[-1]
+    created_at = last.get("created_at")
+    if not created_at:
         return ""
-    use_search, query = _parse_search_decider(content)
-    print(f"DEBUG: Parsed search decision: use_search={use_search}, query={query!r}")
-    if use_search and query:
-        return query
-    return ""
+    delta_seconds = _time.time() - created_at
+    if delta_seconds < 60:
+        return f"Time since last message: {int(delta_seconds)} seconds"
+    minutes = int(delta_seconds / 60)
+    if minutes < 60:
+        return f"Time since last message: {minutes} minute{'s' if minutes != 1 else ''}"
+    hours = minutes // 60
+    remaining = minutes % 60
+    return f"Time since last message: {hours}h {remaining}m"
 
 
-def _decide_screenshot_request(
-    user_text: str, model: str, provider: Optional[str] = None
-) -> Tuple[bool, str]:
-    if not user_text:
-        return False, ""
-    messages = [
-        {"role": "system", "content": SCREENSHOT_DECIDER_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
-    try:
-        content = _llm_chat(messages, model, provider)
-        print(f"DEBUG: Screenshot decider raw content: {content!r}")
-    except (requests.RequestException, RuntimeError) as exc:
-        print(f"DEBUG: Screenshot decider error: {exc}")
-        return False, ""
-    request, reason = _parse_screenshot_decider(content)
-    print(
-        "DEBUG: Parsed screenshot decision: "
-        f"request_screenshot={request}, reason={reason!r}"
+# ── Tool execution ────────────────────────────────────────────────────────
+
+def _execute_tool(
+    name: str,
+    args: Dict[str, Any],
+    active_yaml_store: YamlMemoryStore,
+    search_method: str,
+) -> Tuple[str, bool]:
+    """Execute a tool call. Returns (result_string, is_screenshot_request)."""
+    if name == "webSearch":
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return "Error: missing query parameter.", False
+        results = _run_search(query, search_method, SEARXNG_RESULTS)
+        formatted = _format_search_results(query, results)
+        return formatted or f"No results found for: {query}", False
+
+    if name == "requestScreenshot":
+        return "__SCREENSHOT_REQUESTED__", True
+
+    if name == "memoryStore":
+        content = str(args.get("content", "")).strip()
+        if not content:
+            return "Error: missing content parameter.", False
+        entry_id = active_yaml_store.store(content)
+        return f"Stored memory (id: {entry_id}): {content}", False
+
+    if name == "memoryEdit":
+        entry_id = str(args.get("id", "")).strip()
+        content = str(args.get("content", "")).strip()
+        if not entry_id or not content:
+            return "Error: missing id or content parameter.", False
+        if active_yaml_store.edit(entry_id, content):
+            return f"Updated memory {entry_id}.", False
+        return f"Memory {entry_id} not found.", False
+
+    if name == "memoryDelete":
+        entry_id = str(args.get("id", "")).strip()
+        if not entry_id:
+            return "Error: missing id parameter.", False
+        if active_yaml_store.delete(entry_id):
+            return f"Deleted memory {entry_id}.", False
+        return f"Memory {entry_id} not found.", False
+
+    return f"Unknown tool: {name}", False
+
+
+def _extract_tool_calls_ollama(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract tool calls from an Ollama chat response."""
+    message = data.get("message", {})
+    return message.get("tool_calls") or []
+
+
+def _extract_tool_calls_openrouter(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Extract tool calls from an OpenRouter/OpenAI chat response."""
+    choices = data.get("choices") or []
+    if not choices:
+        return []
+    message = choices[0].get("message", {})
+    return message.get("tool_calls") or []
+
+
+def _ollama_chat_with_tools(
+    messages: List[Dict[str, Any]], model: str, tools: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Ollama chat with tool support — returns the full response dict."""
+    url = f"{OLLAMA_BASE_URL}/api/chat"
+    payload = {"model": model, "messages": messages, "stream": False, "tools": tools}
+    response = requests.post(url, json=payload, timeout=120)
+    response.raise_for_status()
+    return response.json()
+
+
+def _openrouter_chat_with_tools(
+    messages: List[Dict[str, Any]], model: str, tools: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """OpenRouter chat with tool support — returns the full response dict."""
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    payload = {
+        "model": model,
+        "messages": _openrouter_messages(messages),
+        "tools": tools,
+    }
+    response = requests.post(
+        url, headers=_openrouter_headers(), json=payload, timeout=120
     )
-    return request, reason
+    response.raise_for_status()
+    return response.json()
+
+
+def _llm_chat_with_tools(
+    messages: List[Dict[str, Any]],
+    model: str,
+    tools: List[Dict[str, Any]],
+    provider: Optional[str] = None,
+) -> Dict[str, Any]:
+    if _normalize_provider(provider) == "openrouter":
+        return _openrouter_chat_with_tools(messages, model, tools)
+    return _ollama_chat_with_tools(messages, model, tools)
+
+
+def _get_content_from_response(data: Dict[str, Any], provider: Optional[str] = None) -> str:
+    if _normalize_provider(provider) == "openrouter":
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        return choices[0].get("message", {}).get("content", "") or ""
+    return data.get("message", {}).get("content", "") or ""
+
+
+def _get_tool_calls_from_response(
+    data: Dict[str, Any], provider: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    if _normalize_provider(provider) == "openrouter":
+        return _extract_tool_calls_openrouter(data)
+    return _extract_tool_calls_ollama(data)
+
+
+def _normalize_tool_call(tc: Dict[str, Any], provider: Optional[str] = None) -> Tuple[str, Dict[str, Any], str]:
+    """Normalize a tool call from either provider into (name, args, call_id)."""
+    if _normalize_provider(provider) == "openrouter":
+        func = tc.get("function", {})
+        name = func.get("name", "")
+        args_raw = func.get("arguments", "{}")
+        if isinstance(args_raw, str):
+            try:
+                args = json.loads(args_raw)
+            except json.JSONDecodeError:
+                args = {}
+        else:
+            args = args_raw if isinstance(args_raw, dict) else {}
+        call_id = tc.get("id", "")
+        return name, args, call_id
+    else:
+        func = tc.get("function", {})
+        name = func.get("name", "")
+        args = func.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {}
+        return name, args, ""
+
+
+def _append_tool_result_messages(
+    messages: List[Dict[str, Any]],
+    assistant_response: Dict[str, Any],
+    tool_calls: List[Dict[str, Any]],
+    results: List[Tuple[str, str, str]],
+    provider: Optional[str] = None,
+) -> None:
+    """Append the assistant message with tool_calls and the tool result messages."""
+    if _normalize_provider(provider) == "openrouter":
+        msg = (assistant_response.get("choices") or [{}])[0].get("message", {})
+        messages.append(msg)
+        for call_id, name, result_text in results:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": result_text,
+            })
+    else:
+        msg = assistant_response.get("message", {})
+        messages.append(msg)
+        for _call_id, name, result_text in results:
+            messages.append({
+                "role": "tool",
+                "content": result_text,
+            })
+
+
+def _run_tool_loop(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    model: str,
+    provider: Optional[str],
+    active_yaml_store: YamlMemoryStore,
+    search_method: str,
+    max_iterations: int = 6,
+) -> Tuple[str, List[Dict[str, Any]], bool, str]:
+    """
+    Agentic tool loop.
+    Returns (final_content, tool_calls_made, screenshot_requested, screenshot_reason).
+    """
+    tool_calls_made: List[Dict[str, Any]] = []
+    screenshot_requested = False
+    screenshot_reason = ""
+
+    for _ in range(max_iterations):
+        data = _llm_chat_with_tools(messages, model, tools, provider)
+        raw_tool_calls = _get_tool_calls_from_response(data, provider)
+
+        if not raw_tool_calls:
+            content = _get_content_from_response(data, provider)
+            return content, tool_calls_made, screenshot_requested, screenshot_reason
+
+        results: List[Tuple[str, str, str]] = []
+        for tc in raw_tool_calls:
+            name, args, call_id = _normalize_tool_call(tc, provider)
+            result_text, is_screenshot = _execute_tool(
+                name, args, active_yaml_store, search_method
+            )
+
+            tool_calls_made.append({
+                "name": name,
+                "args": args,
+                "result_summary": result_text[:200] if len(result_text) > 200 else result_text,
+            })
+
+            if is_screenshot:
+                screenshot_requested = True
+                screenshot_reason = str(args.get("reason", "Model requested a screenshot"))
+                result_text = "Screenshot has been requested from the user. It will be provided in a follow-up message."
+
+            results.append((call_id, name, result_text))
+
+        _append_tool_result_messages(messages, data, raw_tool_calls, results, provider)
+
+        if screenshot_requested:
+            return "", tool_calls_made, True, screenshot_reason
+
+    content = _get_content_from_response(data, provider)
+    return content, tool_calls_made, screenshot_requested, screenshot_reason
 
 
 def _ollama_running_models() -> List[str]:
@@ -677,186 +961,8 @@ def _ollama_chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[
                 yield content
 
 
-def _parse_header_line(line: str) -> Dict[str, Any]:
-    try:
-        data = json.loads(_normalize_json_quotes(line))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _normalize_json_quotes(text: str) -> str:
-    if not text:
-        return ""
-    return (
-        text.replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .replace("\u201e", '"')
-        .replace("\u201f", '"')
-        .replace("\u2018", "'")
-        .replace("\u2019", "'")
-        .replace("\u201b", "'")
-    )
-
-
-def _parse_header_block(text: str) -> Dict[str, Any]:
-    candidate = _normalize_json_quotes(text.strip())
-    if not candidate:
-        return {}
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError:
-        start = candidate.find("{")
-        end = candidate.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                data = json.loads(candidate[start : end + 1])
-            except json.JSONDecodeError:
-                return {}
-        else:
-            return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _strip_code_fence(text: str) -> str:
-    if not text:
-        return ""
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
-
-
-def _parse_search_decider(content: str) -> Tuple[bool, str]:
-    cleaned = _strip_code_fence(content)
-    header = _parse_header_block(cleaned)
-    if header:
-        use_search = bool(header.get("use_search", False))
-        query = str(header.get("search_query", "")).strip()
-        return use_search, query
-
-    use_match = re.search(r"use_search\s*[:=]\s*(true|false)", cleaned, re.I)
-    if use_match:
-        use_search = use_match.group(1).lower() == "true"
-        query = ""
-        query_match = re.search(
-            r"search_query\s*[:=]\s*\"([^\"]+)\"", cleaned, re.I
-        )
-        if not query_match:
-            query_match = re.search(
-                r"search_query\s*[:=]\s*'([^']+)'", cleaned, re.I
-            )
-        if query_match:
-            query = query_match.group(1).strip()
-        return use_search, query
-
-    return False, ""
-
-
-def _parse_screenshot_decider(content: str) -> Tuple[bool, str]:
-    cleaned = _strip_code_fence(content)
-    header = _parse_header_block(cleaned)
-    if header:
-        request = bool(header.get("request_screenshot", False))
-        reason = str(header.get("reason", "")).strip()
-        return request, reason
-
-    request_match = re.search(
-        r"request_screenshot\s*[:=]\s*(true|false)", cleaned, re.I
-    )
-    if request_match:
-        request = request_match.group(1).lower() == "true"
-        reason = ""
-        reason_match = re.search(r"reason\s*[:=]\s*\"([^\"]+)\"", cleaned, re.I)
-        if not reason_match:
-            reason_match = re.search(r"reason\s*[:=]\s*'([^']+)'", cleaned, re.I)
-        if reason_match:
-            reason = reason_match.group(1).strip()
-        return request, reason
-
-    return False, ""
-
-
-def _split_json_prefix(text: str) -> Tuple[str, str]:
-    if not text:
-        return "", ""
-    stripped = text.lstrip()
-    if not stripped.startswith("{"):
-        return "", text
-    depth = 0
-    in_string = False
-    escape = False
-    for idx, char in enumerate(stripped):
-        if escape:
-            escape = False
-            continue
-        if char == "\\":
-            escape = True
-            continue
-        if char == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                prefix = stripped[: idx + 1]
-                rest = stripped[idx + 1 :]
-                return prefix, rest
-    return "", text
-
-
-def _split_header_body(content: str) -> Tuple[Dict[str, Any], str]:
-    if not content or not content.strip():
-        return {}, ""
-
-    fenced = re.match(r"\s*```(?:json)?\s*", content)
-    if fenced:
-        stripped = content[fenced.end() :]
-        prefix, rest = _split_json_prefix(stripped)
-        if prefix:
-            header = _parse_header_block(prefix)
-            if header:
-                # Remove potential closing backticks from the start of the rest
-                rest = re.sub(r"^\s*```\s*", "", rest)
-                return header, rest.lstrip()
-
-    parts = re.split(r"\r?\n\r?\n", content, maxsplit=1)
-    if len(parts) == 2:
-        header_block, body = parts
-        header = _parse_header_block(header_block)
-        if header:
-            return header, body.lstrip()
-
-    stripped = content.strip()
-    header = _parse_header_block(stripped)
-    if header and (
-        "memory_note" in header
-        or "thinking_summary" in header
-        or "assistant_text" in header
-        or "speak" in header
-    ):
-        return header, ""
-
-    lines = stripped.splitlines()
-    header = _parse_header_line(lines[0].strip())
-    if header:
-        body = "\n".join(lines[1:]).lstrip()
-        return header, body
-
-    prefix, rest = _split_json_prefix(stripped)
-    if prefix:
-        header = _parse_header_block(prefix)
-        if header:
-            return header, rest.lstrip()
-
-    return {}, stripped
-
-
 def _parse_sections(body: str) -> Tuple[str, str]:
+    """Parse [SPOKEN] and [SILENT] sections from the model response."""
     if not body:
         return "", ""
 
@@ -865,12 +971,19 @@ def _parse_sections(body: str) -> Tuple[str, str]:
     section: Optional[str] = None
 
     for line in body.splitlines():
-        marker = line.strip()
-        if marker == "[SPOKEN]":
+        stripped = line.strip()
+        # Check for marker at start of line (with optional text after)
+        if stripped.startswith("[SPOKEN]"):
             section = "spoken"
+            remainder = stripped[len("[SPOKEN]"):].strip()
+            if remainder:
+                spoken_lines.append(remainder)
             continue
-        if marker == "[SILENT]":
+        if stripped.startswith("[SILENT]"):
             section = "silent"
+            remainder = stripped[len("[SILENT]"):].strip()
+            if remainder:
+                silent_lines.append(remainder)
             continue
         if section == "spoken":
             spoken_lines.append(line)
@@ -880,106 +993,12 @@ def _parse_sections(body: str) -> Tuple[str, str]:
     spoken_text = "\n".join(spoken_lines).strip()
     silent_text = "\n".join(silent_lines).strip()
 
-    # Clean up artifacts from spoken text
-    if spoken_text:
-        # Remove leading triple backticks if present (multi-line aware)
-        spoken_text = re.sub(r"^[`'\"]{1,3}\s*", "", spoken_text)
-        # Remove leading "json" label if mixed in
-        spoken_text = re.sub(r"^(?:json|python)\s*", "", spoken_text, flags=re.IGNORECASE)
-
+    # Fallback: strip any remaining markers from raw text
     if not spoken_text and not silent_text:
-        fallback = body.strip()
-        # Apply same cleaning to fallback
-        fallback = re.sub(r"^`{1,3}\s*", "", fallback)
-        fallback = re.sub(r"^json\s*", "", fallback, flags=re.IGNORECASE)
-        # Remove trailing backticks too
-        fallback = re.sub(r"\s*`{1,3}$", "", fallback)
-        return fallback, ""
+        cleaned = body.replace("[SPOKEN]", "").replace("[SILENT]", "").strip()
+        return cleaned, ""
 
     return spoken_text, silent_text
-
-
-def _strip_json_artifacts(text: str) -> str:
-    if not text:
-        return ""
-    cleaned = re.sub(r"^\s*```(?:json)?\s*[\s\S]*?```\s*", "", text, flags=re.I)
-
-    while True:
-        match = re.search(r"\S", cleaned)
-        if not match:
-            return cleaned.strip()
-        start = match.start()
-        line_end = cleaned.find("\n", start)
-        line = cleaned[start:] if line_end == -1 else cleaned[start:line_end]
-        line_stripped = line.strip()
-        looks_like_json = line_stripped.startswith("{") and line_stripped.endswith("}")
-        has_header_keys = re.search(
-            r"\"(?:memory_note|thinking_summary|assistant_text|speak)\"",
-            line_stripped,
-        )
-        has_header_prefix = re.match(
-            r"^(memory_note|thinking_summary|assistant_text|speak)\s*[:=]",
-            line_stripped,
-            re.I,
-        )
-        if not line_stripped:
-            return cleaned.strip()
-        if not (
-            looks_like_json
-            or has_header_keys
-            or has_header_prefix
-            or line_stripped.startswith("```")
-        ):
-            return cleaned.strip()
-        remove_end = len(cleaned) if line_end == -1 else line_end + 1
-        cleaned = cleaned[remove_end:]
-
-
-def _coerce_response(content: str) -> Dict[str, Any]:
-    header, body = _split_header_body(content)
-    memory_note = str(header.get("memory_note", "")).strip() if header else ""
-    thinking_summary = (
-        str(header.get("thinking_summary", "")).strip() if header else ""
-    )
-    # If summary came back as a python list string rep (e.g. "['item']") clean it
-    if thinking_summary.startswith("[") and thinking_summary.endswith("]"):
-        try:
-            # Simple heuristic cleanup instead of dangerous eval
-            inner = thinking_summary[1:-1]
-            parts = [p.strip().strip("'\"") for p in inner.split(",")]
-            thinking_summary = " ".join(parts)
-        except Exception:
-            pass
-
-    if header and ("assistant_text" in header or "speak" in header):
-        assistant_text = str(header.get("assistant_text", "")).strip()
-        speak = bool(header.get("speak", True))
-        assistant_text = _strip_json_artifacts(assistant_text)
-        if speak:
-            spoken_text = assistant_text
-            # Clean up artifacts if they leaked into the JSON field
-            spoken_text = re.sub(r"^[`'\"]{1,3}\s*", "", spoken_text)
-            silent_text = ""
-        else:
-            spoken_text = ""
-            silent_text = assistant_text
-        return {
-            "spoken_text": spoken_text,
-            "silent_text": silent_text,
-            "memory_note": memory_note,
-            "thinking_summary": thinking_summary,
-        }
-
-    spoken_text, silent_text = _parse_sections(body)
-    spoken_text = _strip_json_artifacts(spoken_text)
-    silent_text = _strip_json_artifacts(silent_text)
-
-    return {
-        "spoken_text": spoken_text,
-        "silent_text": silent_text,
-        "memory_note": memory_note,
-        "thinking_summary": thinking_summary,
-    }
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -999,37 +1018,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     provider = _normalize_provider(request.provider)
     default_model = _default_model(provider)
     selected_model = (request.model or default_model).strip() or default_model
-
-    if (
-        user_text
-        and not has_image
-        and not hidden
-        and not screenshot_followup
-        and user_text != "[Thinking Tick]"
-    ):
-        request_screenshot, reason = _decide_screenshot_request(
-            user_text, selected_model, provider
-        )
-        if request_screenshot:
-            active_store.add_message(
-                session_id,
-                "user",
-                user_text or "[Image]",
-                None,
-            )
-            return ChatResponse(
-                session_id=session_id,
-                assistant_text="",
-                silent_text="",
-                speak=False,
-                memory_used=[],
-                thinking_summary="",
-                search_query="",
-                search_results=[],
-                provider=provider,
-                request_screenshot=True,
-                request_reason=reason,
-            )
+    active_yaml_store = _get_yaml_store(personality_id)
 
     recent = active_store.get_recent(session_id, limit=8)
 
@@ -1038,23 +1027,16 @@ def chat(request: ChatRequest) -> ChatResponse:
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
 
-    memories = active_store.search(user_embedding, top_k=4) if user_embedding else []
-    memory_lines = []
-    for item in memories:
-        content = item.get("content")
-        if not content:
-            continue
-        role = item.get("role") or "memory"
-        memory_lines.append(f"[{role}] {content}")
-
-    search_query = _decide_search_query(user_text, selected_model, provider) if search_method != "none" else ""
-    search_results = _run_search(search_query, search_method, SEARXNG_RESULTS)
-    search_block = _format_search_results(search_query, search_results)
-
-    messages: List[Dict[str, str]] = [
+    messages: List[Dict[str, Any]] = [
         {"role": "system", "content": build_system_prompt(tone_context)},
         {"role": "system", "content": _current_time_context()},
     ]
+    time_since = _time_since_last_message_context(recent)
+    if time_since:
+        messages.append({"role": "system", "content": time_since})
+    memory_context = active_yaml_store.format_for_context()
+    if memory_context:
+        messages.append({"role": "system", "content": memory_context})
     if screenshot_followup:
         messages.append(
             {
@@ -1065,28 +1047,44 @@ def chat(request: ChatRequest) -> ChatResponse:
                 ),
             }
         )
-    if memory_lines:
-        memory_block = "Relevant memory snippets:\n" + "\n".join(
-            f"- {line}" for line in memory_lines
-        )
-        messages.append({"role": "system", "content": memory_block})
 
     messages.extend(_format_recent_messages(recent))
-    if search_block:
-        messages.append({"role": "system", "content": search_block})
     prompt_text = user_text or "Please describe the image."
-    user_message = {"role": "user", "content": prompt_text}
+    user_message: Dict[str, Any] = {"role": "user", "content": prompt_text}
     if has_image:
         user_message["images"] = [image_base64]
     messages.append(user_message)
-    context_debug = _build_context_debug(messages)
 
     try:
-        raw_content = _llm_chat(messages, selected_model, provider)
+        raw_content, tool_calls_made, screenshot_requested, screenshot_reason = (
+            _run_tool_loop(
+                messages, TOOL_DEFINITIONS, selected_model, provider,
+                active_yaml_store, search_method,
+            )
+        )
     except (requests.RequestException, RuntimeError) as exc:
         raise HTTPException(status_code=502, detail=f"Chat error: {exc}")
 
-    parsed = _coerce_response(raw_content)
+    context_debug = _build_context_debug(messages)
+
+    if screenshot_requested:
+        if not hidden and user_text != "[Thinking Tick]":
+            active_store.add_message(
+                session_id, "user", user_text or "[Image]", None,
+            )
+        return ChatResponse(
+            session_id=session_id,
+            assistant_text="",
+            silent_text="",
+            speak=False,
+            tool_calls_made=tool_calls_made,
+            provider=provider,
+            request_screenshot=True,
+            request_reason=screenshot_reason,
+            context_debug=context_debug,
+        )
+
+    spoken_text, silent_text = _parse_sections(raw_content)
 
     if not hidden and user_text != "[Thinking Tick]":
         active_store.add_message(
@@ -1096,12 +1094,8 @@ def chat(request: ChatRequest) -> ChatResponse:
             user_embedding if user_embedding else None,
         )
 
-    spoken_text = parsed.get("spoken_text", "")
-    silent_text = parsed.get("silent_text", "")
-
-    # Don't store AI responses to thinking ticks in memory
     is_thinking_tick = user_text == "[Thinking Tick]"
-    
+
     if spoken_text and not is_thinking_tick:
         try:
             assistant_embedding = _ollama_embeddings(spoken_text)
@@ -1109,23 +1103,12 @@ def chat(request: ChatRequest) -> ChatResponse:
             assistant_embedding = []
         active_store.add_message(session_id, "assistant", spoken_text, assistant_embedding)
 
-    memory_note = parsed.get("memory_note", "")
-    if memory_note and not is_thinking_tick:
-        try:
-            memory_embedding = _ollama_embeddings(memory_note)
-        except requests.RequestException:
-            memory_embedding = []
-        active_store.add_message(session_id, "memory", memory_note, memory_embedding)
-
     return ChatResponse(
         session_id=session_id,
         assistant_text=spoken_text,
         silent_text=silent_text,
         speak=bool(spoken_text),
-        memory_used=memory_lines,
-        thinking_summary=str(parsed.get("thinking_summary", "")),
-        search_query=search_query,
-        search_results=search_results,
+        tool_calls_made=tool_calls_made,
         provider=provider,
         context_debug=context_debug,
     )
@@ -1143,51 +1126,12 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     personality_id = (request.personality_id or "default").strip()
     tone_context = (request.tone_context or "").strip() or None
     active_store = _get_store(personality_id)
+    active_yaml_store = _get_yaml_store(personality_id)
     if not user_text and not has_image:
         raise HTTPException(status_code=400, detail="Text or image is required")
     provider = _normalize_provider(request.provider)
     default_model = _default_model(provider)
     selected_model = (request.model or default_model).strip() or default_model
-
-    if (
-        user_text
-        and not has_image
-        and not hidden
-        and not screenshot_followup
-        and user_text != "[Thinking Tick]"
-    ):
-        request_screenshot, reason = _decide_screenshot_request(
-            user_text, selected_model, provider
-        )
-        if request_screenshot:
-            active_store.add_message(
-                session_id,
-                "user",
-                user_text or "[Image]",
-                None,
-            )
-
-            def generate_request() -> Iterable[str]:
-                meta = {
-                    "type": "meta",
-                    "session_id": session_id,
-                    "memory_used": [],
-                    "thinking_summary": "",
-                    "search_query": "",
-                    "search_results": [],
-                    "provider": provider,
-                }
-                yield json.dumps(meta) + "\n"
-                yield json.dumps(
-                    {"type": "request_screenshot", "reason": reason}
-                ) + "\n"
-                yield json.dumps(
-                    {"type": "done", "spoken_text": "", "silent_text": ""}
-                ) + "\n"
-
-            return StreamingResponse(
-                generate_request(), media_type="application/x-ndjson"
-            )
 
     try:
         user_embedding = _ollama_embeddings(user_text) if user_text else []
@@ -1196,23 +1140,16 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
 
     recent = active_store.get_recent(session_id, limit=8)
 
-    memories = active_store.search(user_embedding, top_k=4) if user_embedding else []
-    memory_lines = []
-    for item in memories:
-        content = item.get("content")
-        if not content:
-            continue
-        role = item.get("role") or "memory"
-        memory_lines.append(f"[{role}] {content}")
-
-    search_query = _decide_search_query(user_text, selected_model, provider) if search_method != "none" else ""
-    search_results = _run_search(search_query, search_method, SEARXNG_RESULTS)
-    search_block = _format_search_results(search_query, search_results)
-
-    messages: List[Dict[str, str]] = [
+    messages: List[Dict[str, Any]] = [
         {"role": "system", "content": build_system_prompt(tone_context)},
         {"role": "system", "content": _current_time_context()},
     ]
+    time_since = _time_since_last_message_context(recent)
+    if time_since:
+        messages.append({"role": "system", "content": time_since})
+    memory_context = active_yaml_store.format_for_context()
+    if memory_context:
+        messages.append({"role": "system", "content": memory_context})
     if screenshot_followup:
         messages.append(
             {
@@ -1223,246 +1160,93 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 ),
             }
         )
-    if memory_lines:
-        memory_block = "Relevant memory snippets:\n" + "\n".join(
-            f"- {line}" for line in memory_lines
-        )
-        messages.append({"role": "system", "content": memory_block})
 
     messages.extend(_format_recent_messages(recent))
-    if search_block:
-        messages.append({"role": "system", "content": search_block})
     prompt_text = user_text or "Please describe the image."
-    user_message = {"role": "user", "content": prompt_text}
+    user_message: Dict[str, Any] = {"role": "user", "content": prompt_text}
     if has_image:
         user_message["images"] = [image_base64]
     messages.append(user_message)
+
+    # Run tool loop non-streaming first
+    try:
+        raw_content, tool_calls_made, screenshot_requested, screenshot_reason = (
+            _run_tool_loop(
+                messages, TOOL_DEFINITIONS, selected_model, provider,
+                active_yaml_store, search_method,
+            )
+        )
+    except (requests.RequestException, RuntimeError) as exc:
+        def error_gen() -> Iterable[str]:
+            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+        return StreamingResponse(error_gen(), media_type="application/x-ndjson")
+
     context_debug = _build_context_debug(messages)
 
+    if screenshot_requested:
+        if not hidden and user_text != "[Thinking Tick]":
+            active_store.add_message(session_id, "user", user_text or "[Image]", None)
+
+        def generate_screenshot_request() -> Iterable[str]:
+            meta = {
+                "type": "meta",
+                "session_id": session_id,
+                "tool_calls_made": tool_calls_made,
+                "provider": provider,
+                "context_debug": context_debug,
+            }
+            yield json.dumps(meta) + "\n"
+            yield json.dumps(
+                {"type": "request_screenshot", "reason": screenshot_reason}
+            ) + "\n"
+            yield json.dumps(
+                {"type": "done", "spoken_text": "", "silent_text": ""}
+            ) + "\n"
+
+        return StreamingResponse(
+            generate_screenshot_request(), media_type="application/x-ndjson"
+        )
+
+    # If tool loop returned content directly (no streaming needed for final response),
+    # we still emit it as streamed tokens for wire-format compatibility.
     def generate() -> Iterable[str]:
-        header_parsed = False
-        memory_note = ""
-        thinking_summary = ""
-        buffer = ""
-        body_buffer = ""
-        spoken_chunks: List[str] = []
-        silent_chunks: List[str] = []
-        section: Optional[str] = None
-        meta_sent = False
-        markers = ["[SPOKEN]", "[SILENT]"]
-        max_marker_len = max(len(marker) for marker in markers)
+        meta = {
+            "type": "meta",
+            "session_id": session_id,
+            "tool_calls_made": tool_calls_made,
+            "provider": provider,
+            "context_debug": context_debug,
+        }
+        yield json.dumps(meta) + "\n"
 
-        def emit_tokens(kind: str, text: str) -> Iterable[str]:
-            if not text:
-                return []
-            if kind == "spoken":
-                spoken_chunks.append(text)
-            elif kind == "silent":
-                silent_chunks.append(text)
-            return [json.dumps({"type": "token", "channel": kind, "text": text}) + "\n"]
+        spoken_text, silent_text = _parse_sections(raw_content)
 
-        def drain_buffer(force: bool = False) -> Iterable[str]:
-            nonlocal body_buffer, section
-            output: List[str] = []
-            while body_buffer:
-                idx_spoken = body_buffer.find("[SPOKEN]")
-                idx_silent = body_buffer.find("[SILENT]")
-                indices = [i for i in [idx_spoken, idx_silent] if i != -1]
-                next_idx = min(indices) if indices else -1
+        if spoken_text:
+            yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
+        if silent_text:
+            yield json.dumps({"type": "token", "channel": "silent", "text": silent_text}) + "\n"
 
-                if section is None:
-                    if next_idx == -1:
-                        if force or len(body_buffer) > max_marker_len:
-                            cutoff = (
-                                len(body_buffer)
-                                if force
-                                else len(body_buffer) - max_marker_len
-                            )
-                            chunk = body_buffer[:cutoff]
-                            body_buffer = body_buffer[cutoff:]
-                            output.extend(emit_tokens("spoken", chunk))
-                        break
-                    if next_idx > 0:
-                        chunk = body_buffer[:next_idx]
-                        output.extend(emit_tokens("spoken", chunk))
-                    marker = body_buffer[next_idx : next_idx + len("[SPOKEN]")]
-                    section = "spoken" if marker == "[SPOKEN]" else "silent"
-                    body_buffer = body_buffer[next_idx + len(marker) :].lstrip("\r\n")
-                    continue
+        if not hidden and user_text != "[Thinking Tick]":
+            active_store.add_message(
+                session_id,
+                "user",
+                user_text or "[Image]",
+                user_embedding if user_embedding else None,
+            )
 
-                if next_idx == -1:
-                    if force or len(body_buffer) > max_marker_len:
-                        cutoff = (
-                            len(body_buffer)
-                            if force
-                            else len(body_buffer) - max_marker_len
-                        )
-                        chunk = body_buffer[:cutoff]
-                        body_buffer = body_buffer[cutoff:]
-                        output.extend(emit_tokens(section, chunk))
-                    break
+        is_thinking_tick = user_text == "[Thinking Tick]"
+        if spoken_text and not is_thinking_tick:
+            try:
+                assistant_embedding = _ollama_embeddings(spoken_text)
+            except requests.RequestException:
+                assistant_embedding = []
+            active_store.add_message(
+                session_id, "assistant", spoken_text, assistant_embedding
+            )
 
-                chunk = body_buffer[:next_idx]
-                output.extend(emit_tokens(section, chunk))
-                marker = body_buffer[next_idx : next_idx + len("[SPOKEN]")]
-                section = "spoken" if marker == "[SPOKEN]" else "silent"
-                body_buffer = body_buffer[next_idx + len(marker) :].lstrip("\r\n")
-            return output
-
-        try:
-            for chunk in _llm_chat_stream(messages, selected_model, provider):
-                if not header_parsed:
-                    buffer += chunk
-                    fenced = re.match(r"\s*```(?:json)?\s*", buffer)
-                    if fenced:
-                        stripped = buffer[fenced.end() :]
-                        prefix, rest = _split_json_prefix(stripped)
-                        if prefix:
-                            header = _parse_header_block(prefix)
-                            if header:
-                                memory_note = str(
-                                    header.get("memory_note", "")
-                                ).strip()
-                                thinking_summary = str(
-                                    header.get("thinking_summary", "")
-                                ).strip()
-                                body_buffer = rest.lstrip("\r\n ")
-                                header_parsed = True
-                    if not header_parsed:
-                        sep_idx = buffer.find("\n\n")
-                        sep_len = 2
-                        if sep_idx == -1:
-                            sep_idx = buffer.find("\r\n\r\n")
-                            sep_len = 4
-                        if sep_idx == -1:
-                            newline_idx = buffer.find("\n")
-                            if newline_idx == -1:
-                                prefix, rest = _split_json_prefix(buffer)
-                                if not prefix:
-                                    continue
-                                header = _parse_header_block(prefix)
-                                if not header:
-                                    continue
-                                memory_note = str(
-                                    header.get("memory_note", "")
-                                ).strip()
-                                thinking_summary = str(
-                                    header.get("thinking_summary", "")
-                                ).strip()
-                                body_buffer = rest.lstrip("\r\n ")
-                                header_parsed = True
-                            else:
-                                header_candidate = buffer[:newline_idx].strip()
-                                header = _parse_header_block(header_candidate)
-                                if not header:
-                                    continue
-                                memory_note = str(
-                                    header.get("memory_note", "")
-                                ).strip()
-                                thinking_summary = str(
-                                    header.get("thinking_summary", "")
-                                ).strip()
-                                body_buffer = buffer[newline_idx + 1 :].lstrip("\r\n")
-                                header_parsed = True
-                        else:
-                            header_block = buffer[:sep_idx]
-                            header = _parse_header_block(header_block)
-                            if header:
-                                memory_note = str(
-                                    header.get("memory_note", "")
-                                ).strip()
-                                thinking_summary = str(
-                                    header.get("thinking_summary", "")
-                                ).strip()
-                            body_buffer = buffer[sep_idx + sep_len :].lstrip("\r\n")
-                            header_parsed = True
-
-                    meta = {
-                        "type": "meta",
-                        "session_id": session_id,
-                        "memory_used": memory_lines,
-                        "thinking_summary": thinking_summary,
-                        "search_query": search_query,
-                        "search_results": search_results,
-                        "provider": provider,
-                        "context_debug": context_debug,
-                    }
-                    yield json.dumps(meta) + "\n"
-                    meta_sent = True
-                    buffer = ""
-                    if body_buffer:
-                        for output in drain_buffer():
-                            yield output
-                    continue
-
-                if chunk:
-                    body_buffer += chunk
-                    for output in drain_buffer():
-                        yield output
-
-            if not header_parsed:
-                header_parsed = True
-                meta = {
-                    "type": "meta",
-                    "session_id": session_id,
-                    "memory_used": memory_lines,
-                    "thinking_summary": "",
-                    "search_query": search_query,
-                    "search_results": search_results,
-                    "provider": provider,
-                    "context_debug": context_debug,
-                }
-                yield json.dumps(meta) + "\n"
-                meta_sent = True
-                body_buffer = buffer
-                buffer = ""
-                if body_buffer:
-                    for output in drain_buffer():
-                        yield output
-
-            if body_buffer:
-                for output in drain_buffer(force=True):
-                    yield output
-
-            spoken_text = _strip_json_artifacts("".join(spoken_chunks).strip())
-            silent_text = _strip_json_artifacts("".join(silent_chunks).strip())
-
-            if not hidden and user_text != "[Thinking Tick]":
-                active_store.add_message(
-                    session_id,
-                    "user",
-                    user_text or "[Image]",
-                    user_embedding if user_embedding else None,
-                )
-
-            if spoken_text:
-                try:
-                    assistant_embedding = _ollama_embeddings(spoken_text)
-                except requests.RequestException:
-                    assistant_embedding = []
-                active_store.add_message(
-                    session_id, "assistant", spoken_text, assistant_embedding
-                )
-
-            if memory_note:
-                try:
-                    memory_embedding = _ollama_embeddings(memory_note)
-                except requests.RequestException:
-                    memory_embedding = []
-                active_store.add_message(session_id, "memory", memory_note, memory_embedding)
-
-            if meta_sent:
-                yield json.dumps(
-                    {
-                        "type": "done",
-                        "spoken_text": spoken_text,
-                        "silent_text": silent_text,
-                    }
-                ) + "\n"
-        except requests.RequestException as exc:
-            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
-        except RuntimeError as exc:
-            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+        yield json.dumps(
+            {"type": "done", "spoken_text": spoken_text, "silent_text": silent_text}
+        ) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
@@ -1507,9 +1291,13 @@ def delete_personality_memory(personality_id: str) -> Dict[str, bool]:
     if personality_id == "default":
         raise HTTPException(status_code=400, detail="Cannot delete default personality memory")
     _personality_stores.pop(personality_id, None)
+    _personality_yaml_stores.pop(personality_id, None)
     db_path = BASE_DIR / f"memory_{personality_id}.sqlite3"
     if db_path.exists():
         db_path.unlink()
+    yaml_path = BASE_DIR / f"memories_{personality_id}.yaml"
+    if yaml_path.exists():
+        yaml_path.unlink()
     return {"deleted": True}
 
 

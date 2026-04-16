@@ -147,14 +147,12 @@
         <button class="ghost" id="thinkingClose" type="button">Close</button>
       </div>
       <div class="thinking-section">
-        <h4>Summary</h4>
-        <p id="thinkingSummary">No summary yet.</p>
-        <div class="thinking-screenshot" id="thinkingScreenshot" hidden></div>
+        <h4>Tools used</h4>
+        <ul id="thinkingToolCalls"></ul>
       </div>
       <div class="thinking-section">
-        <h4>Search</h4>
-        <p id="thinkingSearchQuery">No search yet.</p>
-        <ul id="thinkingSearchResults"></ul>
+        <h4>Screenshot</h4>
+        <div class="thinking-screenshot" id="thinkingScreenshot" hidden></div>
       </div>
       <div class="thinking-section">
         <h4>Silent response</h4>
@@ -163,13 +161,12 @@
         </div>
       </div>
       <div class="thinking-section">
-        <h4>Memory used</h4>
-        <ul id="thinkingMemory"></ul>
-      </div>
-      <div class="thinking-section">
         <h4>Full context</h4>
         <button class="ghost small" id="contextToggle" type="button">Show full context</button>
         <pre id="thinkingContext" class="thinking-context" hidden></pre>
+      </div>
+      <div class="thinking-footer">
+        <span id="thinkingTokenEstimate">~0 tokens</span>
       </div>
     </aside>
   </div>

@@ -14,8 +14,11 @@ python\ 3.12/
 
 # DB
 backend/*.sqlite3
+backend/memories*.yaml
 
 # IDEs
 .vscode/
 .idea/
 .claude/
+
+IDEAS.md

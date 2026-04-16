@@ -545,6 +545,16 @@ button.toggle {
   color: var(--muted);
 }
 
+.thinking-footer {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--stroke);
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+  opacity: 0.7;
+}
+
 .thinking-section ul {
   margin: 0;
   padding-left: 18px;
