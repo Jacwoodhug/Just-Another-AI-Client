@@ -1,6 +1,9 @@
 import json
 import os
 import re
+import subprocess
+import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +49,56 @@ OPENROUTER_FREE_ONLY = os.getenv("OPENROUTER_FREE_ONLY", "true").lower() in (
     "on",
 )
 KOKORO_BASE_URL = os.getenv("KOKORO_BASE_URL", "http://localhost:5005").rstrip("/")
+KOKORO_PORT = os.getenv("KOKORO_PORT", "5005")
+
+# ---------------------------------------------------------------------------
+# Kokoro subprocess management
+# ---------------------------------------------------------------------------
+_kokoro_process: Optional[subprocess.Popen] = None
+
+
+def _kokoro_venv_python() -> Optional[str]:
+    """Return the path to the Kokoro venv Python executable, or None."""
+    if sys.platform == "win32":
+        candidate = BASE_DIR / ".venv-kokoro" / "Scripts" / "python.exe"
+    else:
+        candidate = BASE_DIR / ".venv-kokoro" / "bin" / "python"
+    return str(candidate) if candidate.exists() else None
+
+
+def _kokoro_health_check() -> bool:
+    """Return True if the Kokoro service responds to a health check."""
+    try:
+        r = requests.get(f"{KOKORO_BASE_URL}/health", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _is_kokoro_running() -> bool:
+    """Check whether the Kokoro service is reachable."""
+    global _kokoro_process
+    if _kokoro_process is not None and _kokoro_process.poll() is not None:
+        _kokoro_process = None
+    return _kokoro_health_check()
+
+
+def _stop_kokoro() -> None:
+    """Terminate the managed Kokoro subprocess if running."""
+    global _kokoro_process
+    if _kokoro_process is None:
+        return
+    try:
+        _kokoro_process.terminate()
+        try:
+            _kokoro_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _kokoro_process.kill()
+            _kokoro_process.wait(timeout=3)
+    except Exception:
+        pass
+    _kokoro_process = None
+
 
 _SYSTEM_PROMPT_PRE_TONE = (
     "You are a voice chat assistant in a web GUI. "
@@ -937,7 +990,8 @@ def _ollama_stop_model(name: str) -> None:
 
 
 @app.on_event("shutdown")
-def unload_ollama_models() -> None:
+def shutdown_cleanup() -> None:
+    _stop_kokoro()
     for model_name in _ollama_running_models():
         _ollama_stop_model(model_name)
 
@@ -1347,3 +1401,76 @@ def tts_proxy(request: TTSRequest) -> StreamingResponse:
             response.close()
 
     return StreamingResponse(stream_audio(), media_type=media_type)
+
+
+# ---------------------------------------------------------------------------
+# Kokoro subprocess lifecycle endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/kokoro/status")
+def kokoro_status() -> Dict[str, Any]:
+    return {
+        "running": _is_kokoro_running(),
+        "available": _kokoro_venv_python() is not None,
+        "managed": _kokoro_process is not None,
+    }
+
+
+@app.post("/api/kokoro/start")
+def kokoro_start() -> Dict[str, str]:
+    global _kokoro_process
+    if _is_kokoro_running():
+        raise HTTPException(status_code=409, detail="Kokoro is already running")
+
+    python_path = _kokoro_venv_python()
+    if python_path is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Kokoro venv not found at backend/.venv-kokoro",
+        )
+
+    try:
+        _kokoro_process = subprocess.Popen(
+            [
+                python_path,
+                "-m",
+                "uvicorn",
+                "kokoro_service:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                KOKORO_PORT,
+            ],
+            cwd=str(BASE_DIR),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        _kokoro_process = None
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start Kokoro: {exc}"
+        )
+
+    # Poll health endpoint until ready (up to ~30s)
+    for _ in range(60):
+        if _kokoro_process.poll() is not None:
+            _kokoro_process = None
+            raise HTTPException(
+                status_code=500, detail="Kokoro process exited unexpectedly"
+            )
+        if _kokoro_health_check():
+            return {"status": "running"}
+        time.sleep(0.5)
+
+    # Timed out — kill the process
+    _stop_kokoro()
+    raise HTTPException(
+        status_code=500, detail="Kokoro did not become ready within 30 seconds"
+    )
+
+
+@app.post("/api/kokoro/stop")
+def kokoro_stop() -> Dict[str, str]:
+    _stop_kokoro()
+    return {"status": "stopped"}

@@ -60,6 +60,9 @@ const peTtsVoiceSelect = document.getElementById("peTtsVoiceSelect");
 const peSeparateMemory = document.getElementById("peSeparateMemory");
 const peSaveBtn = document.getElementById("peSaveBtn");
 const peCancelBtn = document.getElementById("peCancelBtn");
+const kokoroToggleBtn = document.getElementById("kokoroToggleBtn");
+const kokoroStatusDot = document.getElementById("kokoroStatusDot");
+const kokoroStatusText = document.getElementById("kokoroStatusText");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -2119,11 +2122,88 @@ function updateSearchMethodUI() {
 
 function openSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = false;
+  checkKokoroStatus();
 }
 
 function closeSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = true;
 }
+
+// ── Kokoro TTS service management ───────────────────────────────────────────
+
+let kokoroServiceRunning = false;
+let kokoroServiceAvailable = false;
+let kokoroServiceBusy = false;
+
+function updateKokoroUI() {
+  if (!kokoroToggleBtn || !kokoroStatusDot || !kokoroStatusText) return;
+
+  kokoroStatusDot.classList.remove("running", "stopped", "unavailable");
+
+  if (!kokoroServiceAvailable) {
+    kokoroStatusDot.classList.add("unavailable");
+    kokoroStatusText.textContent = "Unavailable";
+    kokoroToggleBtn.textContent = "Launch";
+    kokoroToggleBtn.disabled = true;
+  } else if (kokoroServiceBusy) {
+    kokoroStatusDot.classList.add("stopped");
+    kokoroStatusText.textContent = kokoroServiceRunning ? "Stopping…" : "Starting…";
+    kokoroToggleBtn.textContent = kokoroServiceRunning ? "Close" : "Launch";
+    kokoroToggleBtn.disabled = true;
+  } else if (kokoroServiceRunning) {
+    kokoroStatusDot.classList.add("running");
+    kokoroStatusText.textContent = "Running";
+    kokoroToggleBtn.textContent = "Close";
+    kokoroToggleBtn.disabled = false;
+  } else {
+    kokoroStatusDot.classList.add("stopped");
+    kokoroStatusText.textContent = "Stopped";
+    kokoroToggleBtn.textContent = "Launch";
+    kokoroToggleBtn.disabled = false;
+  }
+}
+
+async function checkKokoroStatus() {
+  try {
+    const res = await fetch("/api/kokoro/status");
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    kokoroServiceRunning = !!data.running;
+    kokoroServiceAvailable = !!data.available;
+  } catch {
+    kokoroServiceRunning = false;
+    kokoroServiceAvailable = false;
+  }
+  updateKokoroUI();
+}
+
+async function toggleKokoroService() {
+  if (kokoroServiceBusy) return;
+  kokoroServiceBusy = true;
+  updateKokoroUI();
+
+  try {
+    if (kokoroServiceRunning) {
+      await fetch("/api/kokoro/stop", { method: "POST" });
+    } else {
+      const res = await fetch("/api/kokoro/start", { method: "POST" });
+      if (res.ok && ttsProvider === "kokoro") {
+        populateKokoroVoices();
+      }
+    }
+  } catch {
+    // ignore – status check below will update UI
+  }
+
+  kokoroServiceBusy = false;
+  await checkKokoroStatus();
+}
+
+if (kokoroToggleBtn) {
+  kokoroToggleBtn.addEventListener("click", toggleKokoroService);
+}
+
+checkKokoroStatus();
 
 updateSearchMethodUI();
 

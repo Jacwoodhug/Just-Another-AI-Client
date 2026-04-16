@@ -1005,6 +1005,36 @@ input {
   text-overflow: ellipsis;
 }
 
+/* Kokoro status indicator */
+.kokoro-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-left: 8px;
+  vertical-align: middle;
+  background: var(--muted);
+}
+
+.kokoro-status-dot.running {
+  background: #4caf50;
+}
+
+.kokoro-status-dot.stopped {
+  background: var(--muted);
+}
+
+.kokoro-status-dot.unavailable {
+  background: #b33;
+}
+
+.kokoro-status-text {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
 .personality-card-badge {
   font-size: 11px;
   color: var(--muted);
