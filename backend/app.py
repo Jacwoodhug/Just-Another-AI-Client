@@ -68,6 +68,7 @@ COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
 
 CHAT_MAX_HISTORY = int(os.getenv("CHAT_MAX_HISTORY", "20"))
 CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "4096"))
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
 COMFYUI_SETTINGS_FILE = BASE_DIR / "comfyui_settings.json"
 
 # Load active checkpoint from persisted settings (fallback to default)
@@ -416,6 +417,7 @@ class ChatRequest(BaseModel):
     tone_context: Optional[str] = None
     max_history: Optional[int] = None
     max_context_tokens: Optional[int] = None
+    max_rag_results: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
@@ -1585,6 +1587,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     active_yaml_store = _get_yaml_store(personality_id)
     eff_max_history = request.max_history if request.max_history is not None else CHAT_MAX_HISTORY
     eff_max_tokens = request.max_context_tokens if request.max_context_tokens is not None else CONTEXT_MAX_TOKENS
+    eff_rag_top_k = request.max_rag_results if request.max_rag_results is not None else RAG_TOP_K
 
     recent = active_store.get_recent(session_id, limit=eff_max_history)
 
@@ -1604,14 +1607,24 @@ def chat(request: ChatRequest) -> ChatResponse:
     if memory_context:
         messages.append({"role": "system", "content": memory_context})
     if user_embedding:
-        rag_results = active_store.search(user_embedding, top_k=4)
+        rag_results = active_store.search(user_embedding, top_k=eff_rag_top_k)
         if rag_results:
-            rag_lines = ["Relevant past conversations:"]
+            base_used = _estimate_tokens(" ".join(m["content"] for m in messages))
+            rag_budget = max(0, eff_max_tokens - base_used)
+            trimmed_rag = []
             for item in rag_results:
-                role = item.get("role", "user").capitalize()
-                content = item.get("content", "")
-                rag_lines.append(f"{role}: {content}")
-            messages.append({"role": "system", "content": "\n".join(rag_lines)})
+                cost = _estimate_tokens(item.get("content") or "")
+                if rag_budget - cost < 0:
+                    break
+                trimmed_rag.append(item)
+                rag_budget -= cost
+            if trimmed_rag:
+                rag_lines = ["Relevant past conversations:"]
+                for item in trimmed_rag:
+                    role = item.get("role", "user").capitalize()
+                    content = item.get("content", "")
+                    rag_lines.append(f"{role}: {content}")
+                messages.append({"role": "system", "content": "\n".join(rag_lines)})
     # Trim recent messages to fit within token budget
     fixed_context = " ".join(m["content"] for m in messages)
     recent = _trim_recent_to_token_budget(recent, fixed_context, eff_max_tokens)
@@ -1707,6 +1720,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     active_yaml_store = _get_yaml_store(personality_id)
     eff_max_history = request.max_history if request.max_history is not None else CHAT_MAX_HISTORY
     eff_max_tokens = request.max_context_tokens if request.max_context_tokens is not None else CONTEXT_MAX_TOKENS
+    eff_rag_top_k = request.max_rag_results if request.max_rag_results is not None else RAG_TOP_K
     if not user_text and not has_image:
         raise HTTPException(status_code=400, detail="Text or image is required")
     provider = _normalize_provider(request.provider)
@@ -1731,14 +1745,24 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     if memory_context:
         messages.append({"role": "system", "content": memory_context})
     if user_embedding:
-        rag_results = active_store.search(user_embedding, top_k=4)
+        rag_results = active_store.search(user_embedding, top_k=eff_rag_top_k)
         if rag_results:
-            rag_lines = ["Relevant past conversations:"]
+            base_used = _estimate_tokens(" ".join(m["content"] for m in messages))
+            rag_budget = max(0, eff_max_tokens - base_used)
+            trimmed_rag = []
             for item in rag_results:
-                role = item.get("role", "user").capitalize()
-                content = item.get("content", "")
-                rag_lines.append(f"{role}: {content}")
-            messages.append({"role": "system", "content": "\n".join(rag_lines)})
+                cost = _estimate_tokens(item.get("content") or "")
+                if rag_budget - cost < 0:
+                    break
+                trimmed_rag.append(item)
+                rag_budget -= cost
+            if trimmed_rag:
+                rag_lines = ["Relevant past conversations:"]
+                for item in trimmed_rag:
+                    role = item.get("role", "user").capitalize()
+                    content = item.get("content", "")
+                    rag_lines.append(f"{role}: {content}")
+                messages.append({"role": "system", "content": "\n".join(rag_lines)})
     # Trim recent messages to fit within token budget
     fixed_context = " ".join(m["content"] for m in messages)
     recent = _trim_recent_to_token_budget(recent, fixed_context, eff_max_tokens)

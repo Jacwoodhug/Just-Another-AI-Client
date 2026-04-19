@@ -156,6 +156,8 @@ const CHAT_MAX_HISTORY_KEY = "chatMaxHistory";
 const CONTEXT_MAX_TOKENS_KEY = "contextMaxTokens";
 let chatMaxHistory = parseInt(localStorage.getItem(CHAT_MAX_HISTORY_KEY) || "20", 10);
 let contextMaxTokens = parseInt(localStorage.getItem(CONTEXT_MAX_TOKENS_KEY) || "4000", 10);
+const RAG_TOP_K_KEY = "ragTopK";
+let ragTopK = parseInt(localStorage.getItem(RAG_TOP_K_KEY) || "4", 10);
 const PERSONALITIES_KEY = "personalities";
 const ACTIVE_PERSONALITY_KEY = "activePersonality";
 const DEFAULT_TONE_CONTEXT = `Tone & personality:
@@ -1684,6 +1686,7 @@ async function sendText(text, options = {}) {
     tone_context: activeP.toneContext || "",
     max_history: chatMaxHistory,
     max_context_tokens: contextMaxTokens,
+    max_rag_results: ragTopK,
   };
   if (currentProvider) {
     payload.provider = currentProvider;
@@ -2249,8 +2252,10 @@ function openSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = false;
   const histInput = document.getElementById("chatMaxHistoryInput");
   const tokInput = document.getElementById("contextMaxTokensInput");
+  const ragInput = document.getElementById("ragTopKInput");
   if (histInput) histInput.value = chatMaxHistory;
   if (tokInput) tokInput.value = Math.round(contextMaxTokens / 1000);
+  if (ragInput) ragInput.value = ragTopK;
   checkKokoroStatus();
   checkComfyUIStatus();
   loadComfyUIModels();
@@ -2672,6 +2677,17 @@ if (contextMaxTokensInput) {
     if (!isNaN(val) && val >= 1) {
       contextMaxTokens = val * 1000;
       localStorage.setItem(CONTEXT_MAX_TOKENS_KEY, contextMaxTokens);
+    }
+  });
+}
+
+const ragTopKInput = document.getElementById("ragTopKInput");
+if (ragTopKInput) {
+  ragTopKInput.addEventListener("change", () => {
+    const val = parseInt(ragTopKInput.value, 10);
+    if (!isNaN(val) && val >= 0) {
+      ragTopK = val;
+      localStorage.setItem(RAG_TOP_K_KEY, val);
     }
   });
 }
