@@ -64,7 +64,6 @@ else:
     COMFYUI_DIR = str(_default_comfyui) if _default_comfyui.is_dir() else ""
 COMFYUI_MODELS_PATH = os.getenv("COMFYUI_MODELS_PATH", "").strip()
 COMFYUI_VRAM_THRESHOLD_GB = float(os.getenv("COMFYUI_VRAM_THRESHOLD_GB", "10"))
-COMFYUI_MIN_VRAM_GB = float(os.getenv("COMFYUI_MIN_VRAM_GB", "2.0"))
 COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
 
 CHAT_MAX_HISTORY = int(os.getenv("CHAT_MAX_HISTORY", "20"))
@@ -432,6 +431,7 @@ class ChatResponse(BaseModel):
     request_screenshot: bool = False
     request_reason: str = ""
     context_debug: str = ""
+    raw_output: str = ""
 
 
 class ModelListResponse(BaseModel):
@@ -1210,15 +1210,16 @@ def _comfyui_free_memory() -> None:
 
 
 def _comfyui_model_loaded() -> bool:
-    """Return True if ComfyUI already has a model loaded in VRAM (torch_vram_used > 100 MB)."""
+    """Return True if ComfyUI already has a model loaded in VRAM (actual vram_used > 500 MB)."""
     try:
         r = requests.get(f"{COMFYUI_BASE_URL}/system_stats", timeout=3)
         if r.status_code != 200:
             return False
         devices = r.json().get("devices", [])
         for dev in devices:
-            used = dev.get("torch_vram_total", 0) - dev.get("torch_vram_free", 0)
-            if used > 100 * 1024 * 1024:  # >100 MB means a model is resident
+            # Use vram_total/vram_free (actual GPU VRAM), not torch_vram_* (tiny reserved pool)
+            used = dev.get("vram_total", 0) - dev.get("vram_free", 0)
+            if used > 500 * 1024 * 1024:  # >500 MB means a model is resident
                 return True
         return False
     except Exception:
@@ -1721,6 +1722,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         tool_calls_made=tool_calls_made,
         provider=provider,
         context_debug=context_debug,
+        raw_output=raw_content,
     )
 
 
@@ -1827,9 +1829,11 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             # ── First call: streaming so tokens appear progressively ──
             section_state = _SectionStreamState()
             first_data: Optional[Dict[str, Any]] = None
+            raw_content_accumulated = ""
 
             for event_type, value in _llm_stream_first_call(messages, selected_model, tools, provider):
                 if event_type == "token":
+                    raw_content_accumulated += value
                     sp, si = section_state.feed(value)
                     if sp:
                         spoken_text += sp
@@ -1865,6 +1869,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 if not raw_tool_calls:
                     # Genuinely no tool calls — yield whatever text the model produced.
                     raw_content = _get_content_from_response(data, provider)
+                    raw_content_accumulated = raw_content
                     spoken_text, silent_text = _parse_sections(raw_content)
                     if spoken_text:
                         yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
@@ -1879,6 +1884,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                     if iteration_count > 0:
                         # Final response from a post-tool non-streaming call.
                         raw_content = _get_content_from_response(data, provider)
+                        raw_content_accumulated = raw_content
                         spoken_text, silent_text = _parse_sections(raw_content)
                         if spoken_text:
                             yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
@@ -1896,20 +1902,18 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 ]
                 ollama_models_unloaded: List[str] = []
                 if _image_tool_calls and _is_comfyui_running() and provider != "openrouter":
-                    free_vram = _get_free_vram_gb()
-                    if (free_vram is not None and
-                            free_vram < COMFYUI_VRAM_THRESHOLD_GB and
-                            free_vram < COMFYUI_MIN_VRAM_GB and
-                            not _comfyui_model_loaded()):
-                        yield json.dumps({
-                            "type": "status",
-                            "text": f"Low VRAM ({free_vram:.1f} GB free) — unloading language model…",
-                        }) + "\n"
-                        ollama_models_unloaded = _ollama_running_models()
-                        for m in ollama_models_unloaded:
-                            _ollama_stop_model(m)
-                        _comfyui_free_memory()
-                        time.sleep(1)
+                    if not _comfyui_model_loaded():
+                        free_vram = _get_free_vram_gb()
+                        if free_vram is not None and free_vram < COMFYUI_VRAM_THRESHOLD_GB:
+                            yield json.dumps({
+                                "type": "status",
+                                "text": f"Low VRAM ({free_vram:.1f} GB free) — unloading language model…",
+                            }) + "\n"
+                            ollama_models_unloaded = _ollama_running_models()
+                            for m in ollama_models_unloaded:
+                                _ollama_stop_model(m)
+                            _comfyui_free_memory()
+                            time.sleep(1)
 
                 if _image_tool_calls:
                     yield json.dumps({"type": "image_generation_start", "total": len(_image_tool_calls)}) + "\n"
@@ -2049,6 +2053,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             "silent_text": silent_text,
             "tool_calls_made": tool_calls_made,
             "context_debug": context_debug,
+            "raw_output": raw_content_accumulated,
         }) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")

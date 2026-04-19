@@ -18,6 +18,7 @@ backend/memories*.yaml
 
 ComfyUI/
 generated_images/
+comfyui_settings.json
 
 # IDEs
 .vscode/

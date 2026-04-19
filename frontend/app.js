@@ -40,6 +40,8 @@ const thinkingVramLabel = document.getElementById("thinkingVramLabel");
 const thinkingVramArc = document.getElementById("thinkingVramArc");
 const thinkingContextToggle = document.getElementById("contextToggle");
 const thinkingContextBody = document.getElementById("thinkingContext");
+const rawOutputToggle = document.getElementById("rawOutputToggle");
+const rawOutputBody = document.getElementById("thinkingRawOutput");
 const settingsBtn = document.getElementById("settingsBtn");
 const settingsBackdrop = document.getElementById("settingsBackdrop");
 const settingsClose = document.getElementById("settingsClose");
@@ -182,6 +184,8 @@ let screenshotRequestInProgress = false;
 let lastUserPrompt = "";
 let contextDebugText = "";
 let contextVisible = false;
+let rawOutputText = "";
+let rawOutputVisible = false;
 let pendingScreenshotDataUrl = "";
 let pendingScreenshotLabel = "";
 
@@ -226,6 +230,7 @@ function newSession() {
   updateThinkingPanel([]);
   clearThinkingMessages();
   setThinkingContext("");
+  setRawOutput("");
   setThinkingScreenshot("", "");
   clearImage();
   clearChatHistory(newId);
@@ -497,6 +502,7 @@ function switchSession(id) {
   updateThinkingPanel([]);
   clearThinkingMessages();
   setThinkingContext("");
+  setRawOutput("");
   setThinkingScreenshot("", "");
   loadChatHistory();
   renderSessionList();
@@ -1231,6 +1237,33 @@ function setThinkingContext(text) {
   }
 }
 
+function setRawOutput(text) {
+  rawOutputText = text || "";
+  if (!rawOutputToggle || !rawOutputBody) {
+    return;
+  }
+  const hasOutput = Boolean(rawOutputText);
+  if (!hasOutput) {
+    rawOutputVisible = false;
+    rawOutputBody.textContent = "";
+    rawOutputBody.hidden = true;
+    rawOutputToggle.textContent = "Show raw output";
+    rawOutputToggle.disabled = true;
+    return;
+  }
+  rawOutputToggle.disabled = false;
+  rawOutputToggle.textContent = rawOutputVisible
+    ? "Hide raw output"
+    : "Show raw output";
+  if (rawOutputVisible) {
+    rawOutputBody.textContent = rawOutputText;
+    rawOutputBody.hidden = false;
+  } else {
+    rawOutputBody.textContent = "";
+    rawOutputBody.hidden = true;
+  }
+}
+
 function setThinkingScreenshot(dataUrl, label) {
   if (!thinkingScreenshot) {
     return;
@@ -1698,6 +1731,7 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
     setProviderBadge(data.provider);
   }
   setThinkingContext(data.context_debug || "");
+  setRawOutput(data.raw_output || "");
   if (data.request_screenshot) {
     await requestScreenshotFromAssistant({
       promptText: sourceText,
@@ -1999,6 +2033,7 @@ async function sendText(text, options = {}) {
             : [];
           updateThinkingPanel(toolCalls);
           setThinkingContext(message.context_debug || "");
+          setRawOutput(message.raw_output || "");
           updateThinkingTokenEstimate(message.context_debug || "");
           flushSpeechBuffer(true);
           if (
@@ -2364,6 +2399,16 @@ if (thinkingContextToggle) {
     }
     contextVisible = !contextVisible;
     setThinkingContext(contextDebugText);
+  });
+}
+
+if (rawOutputToggle) {
+  rawOutputToggle.addEventListener("click", () => {
+    if (!rawOutputText) {
+      return;
+    }
+    rawOutputVisible = !rawOutputVisible;
+    setRawOutput(rawOutputText);
   });
 }
 
