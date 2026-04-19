@@ -65,6 +65,9 @@ else:
 COMFYUI_MODELS_PATH = os.getenv("COMFYUI_MODELS_PATH", "").strip()
 COMFYUI_VRAM_THRESHOLD_GB = float(os.getenv("COMFYUI_VRAM_THRESHOLD_GB", "10"))
 COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
+
+CHAT_MAX_HISTORY = int(os.getenv("CHAT_MAX_HISTORY", "20"))
+CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "4096"))
 COMFYUI_SETTINGS_FILE = BASE_DIR / "comfyui_settings.json"
 
 # Load active checkpoint from persisted settings (fallback to default)
@@ -411,6 +414,8 @@ class ChatRequest(BaseModel):
     search_method: Optional[str] = "searxng"
     personality_id: Optional[str] = "default"
     tone_context: Optional[str] = None
+    max_history: Optional[int] = None
+    max_context_tokens: Optional[int] = None
 
 
 class ChatResponse(BaseModel):
@@ -845,6 +850,38 @@ def _build_context_debug(messages: List[Dict[str, Any]]) -> str:
         entry = f"{role}:\n{content}".strip()
         lines.append(entry)
     return "\n\n".join(lines).strip()
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+
+def _trim_recent_to_token_budget(
+    recent: List[Dict[str, Any]],
+    fixed_context: str,
+    max_tokens: int,
+) -> List[Dict[str, Any]]:
+    """
+    Drop oldest messages from `recent` until the estimated total token count
+    (fixed_context + all recent messages) fits within max_tokens.
+    Always keeps at least the most recent 2 messages if any exist.
+    """
+    used = _estimate_tokens(fixed_context)
+    if used >= max_tokens:
+        return recent[-2:] if len(recent) >= 2 else list(recent)
+
+    kept: List[Dict[str, Any]] = []
+    budget = max_tokens - used
+    # Walk from newest to oldest
+    for item in reversed(recent):
+        cost = _estimate_tokens(item.get("content") or "")
+        if budget - cost < 0 and len(kept) >= 2:
+            break
+        kept.insert(0, item)
+        budget -= cost
+
+    return kept
 
 
 def _time_since_last_message_context(recent: List[Dict[str, Any]]) -> str:
@@ -1546,8 +1583,10 @@ def chat(request: ChatRequest) -> ChatResponse:
     default_model = _default_model(provider)
     selected_model = (request.model or default_model).strip() or default_model
     active_yaml_store = _get_yaml_store(personality_id)
+    eff_max_history = request.max_history if request.max_history is not None else CHAT_MAX_HISTORY
+    eff_max_tokens = request.max_context_tokens if request.max_context_tokens is not None else CONTEXT_MAX_TOKENS
 
-    recent = active_store.get_recent(session_id, limit=8)
+    recent = active_store.get_recent(session_id, limit=eff_max_history)
 
     try:
         user_embedding = _ollama_embeddings(user_text) if user_text else []
@@ -1564,6 +1603,18 @@ def chat(request: ChatRequest) -> ChatResponse:
     memory_context = active_yaml_store.format_for_context()
     if memory_context:
         messages.append({"role": "system", "content": memory_context})
+    if user_embedding:
+        rag_results = active_store.search(user_embedding, top_k=4)
+        if rag_results:
+            rag_lines = ["Relevant past conversations:"]
+            for item in rag_results:
+                role = item.get("role", "user").capitalize()
+                content = item.get("content", "")
+                rag_lines.append(f"{role}: {content}")
+            messages.append({"role": "system", "content": "\n".join(rag_lines)})
+    # Trim recent messages to fit within token budget
+    fixed_context = " ".join(m["content"] for m in messages)
+    recent = _trim_recent_to_token_budget(recent, fixed_context, eff_max_tokens)
     if screenshot_followup:
         messages.append(
             {
@@ -1654,6 +1705,8 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     tone_context = (request.tone_context or "").strip() or None
     active_store = _get_store(personality_id)
     active_yaml_store = _get_yaml_store(personality_id)
+    eff_max_history = request.max_history if request.max_history is not None else CHAT_MAX_HISTORY
+    eff_max_tokens = request.max_context_tokens if request.max_context_tokens is not None else CONTEXT_MAX_TOKENS
     if not user_text and not has_image:
         raise HTTPException(status_code=400, detail="Text or image is required")
     provider = _normalize_provider(request.provider)
@@ -1665,7 +1718,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
 
-    recent = active_store.get_recent(session_id, limit=8)
+    recent = active_store.get_recent(session_id, limit=eff_max_history)
 
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": build_system_prompt(tone_context)},
@@ -1677,6 +1730,18 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     memory_context = active_yaml_store.format_for_context()
     if memory_context:
         messages.append({"role": "system", "content": memory_context})
+    if user_embedding:
+        rag_results = active_store.search(user_embedding, top_k=4)
+        if rag_results:
+            rag_lines = ["Relevant past conversations:"]
+            for item in rag_results:
+                role = item.get("role", "user").capitalize()
+                content = item.get("content", "")
+                rag_lines.append(f"{role}: {content}")
+            messages.append({"role": "system", "content": "\n".join(rag_lines)})
+    # Trim recent messages to fit within token budget
+    fixed_context = " ".join(m["content"] for m in messages)
+    recent = _trim_recent_to_token_budget(recent, fixed_context, eff_max_tokens)
     if screenshot_followup:
         messages.append(
             {

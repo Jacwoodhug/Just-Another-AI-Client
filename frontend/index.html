@@ -200,6 +200,17 @@
             <button class="setting-option" type="button" data-value="none">None</button>
           </div>
         </div>
+        <div class="setting-row">
+          <label class="setting-label" for="chatMaxHistoryInput">Max History Messages</label>
+          <input type="number" id="chatMaxHistoryInput" min="1" max="200" value="20" style="width:80px;text-align:right">
+        </div>
+        <div class="setting-row">
+          <label class="setting-label" for="contextMaxTokensInput">Max Context Tokens</label>
+          <div style="display:flex;align-items:center;gap:5px">
+            <input type="number" id="contextMaxTokensInput" min="1" max="128" step="1" value="4" style="width:80px;text-align:right">
+            <span style="font-size:15px;color:var(--ink);font-weight:600">k</span>
+          </div>
+        </div>
         <div class="setting-section">
           <div class="setting-section-header">
             <span class="setting-label">Personalities</span>
@@ -307,7 +318,7 @@
               </div>
             </details>
             <div style="margin-top:14px;text-align:right">
-              <button class="small" id="comfyuiSaveSettingsBtn" type="button">Save Settings</button>
+              <button class="small" id="comfyuiSaveSettingsBtn" type="button">Save ComfyUI Settings</button>
             </div>
           </div>
         </div>

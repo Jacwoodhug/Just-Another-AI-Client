@@ -152,6 +152,10 @@ let kokoroCurrentAudio = null;
 const SESSION_STORAGE_KEY = "chatSessions";
 const SEARCH_METHOD_KEY = "searchMethod";
 let searchMethod = localStorage.getItem(SEARCH_METHOD_KEY) || "searxng";
+const CHAT_MAX_HISTORY_KEY = "chatMaxHistory";
+const CONTEXT_MAX_TOKENS_KEY = "contextMaxTokens";
+let chatMaxHistory = parseInt(localStorage.getItem(CHAT_MAX_HISTORY_KEY) || "20", 10);
+let contextMaxTokens = parseInt(localStorage.getItem(CONTEXT_MAX_TOKENS_KEY) || "4000", 10);
 const PERSONALITIES_KEY = "personalities";
 const ACTIVE_PERSONALITY_KEY = "activePersonality";
 const DEFAULT_TONE_CONTEXT = `Tone & personality:
@@ -1678,6 +1682,8 @@ async function sendText(text, options = {}) {
     search_method: searchMethod,
     personality_id: activeP.id,
     tone_context: activeP.toneContext || "",
+    max_history: chatMaxHistory,
+    max_context_tokens: contextMaxTokens,
   };
   if (currentProvider) {
     payload.provider = currentProvider;
@@ -2241,6 +2247,10 @@ function updateSearchMethodUI() {
 
 function openSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = false;
+  const histInput = document.getElementById("chatMaxHistoryInput");
+  const tokInput = document.getElementById("contextMaxTokensInput");
+  if (histInput) histInput.value = chatMaxHistory;
+  if (tokInput) tokInput.value = Math.round(contextMaxTokens / 1000);
   checkKokoroStatus();
   checkComfyUIStatus();
   loadComfyUIModels();
@@ -2641,6 +2651,28 @@ if (searchMethodToggle) {
     searchMethod = btn.dataset.value;
     localStorage.setItem(SEARCH_METHOD_KEY, searchMethod);
     updateSearchMethodUI();
+  });
+}
+
+const chatMaxHistoryInput = document.getElementById("chatMaxHistoryInput");
+if (chatMaxHistoryInput) {
+  chatMaxHistoryInput.addEventListener("change", () => {
+    const val = parseInt(chatMaxHistoryInput.value, 10);
+    if (!isNaN(val) && val >= 1) {
+      chatMaxHistory = val;
+      localStorage.setItem(CHAT_MAX_HISTORY_KEY, val);
+    }
+  });
+}
+
+const contextMaxTokensInput = document.getElementById("contextMaxTokensInput");
+if (contextMaxTokensInput) {
+  contextMaxTokensInput.addEventListener("change", () => {
+    const val = parseInt(contextMaxTokensInput.value, 10);
+    if (!isNaN(val) && val >= 1) {
+      contextMaxTokens = val * 1000;
+      localStorage.setItem(CONTEXT_MAX_TOKENS_KEY, contextMaxTokens);
+    }
   });
 }
 

@@ -1056,6 +1056,7 @@ input {
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 24px;
 }
 
 .modal-backdrop[hidden] {
@@ -1069,6 +1070,9 @@ input {
   box-shadow: 0 32px 80px rgba(4, 3, 2, 0.6);
   padding: 28px;
   width: min(620px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
 }
 
 .modal-header {
@@ -1089,6 +1093,9 @@ input {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .setting-row {
