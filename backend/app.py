@@ -434,6 +434,15 @@ class ChatResponse(BaseModel):
     raw_output: str = ""
 
 
+class GenerateImageRequest(BaseModel):
+    prompt: str
+    negative_prompt: Optional[str] = ""
+    resolution: Optional[str] = None
+    raw: Optional[bool] = False
+    model: Optional[str] = None
+    provider: Optional[str] = None
+
+
 class ModelListResponse(BaseModel):
     models: List[str]
     default_model: str
@@ -2492,7 +2501,93 @@ def clean_vram() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/comfyui/validate-workflow")
+@app.post("/api/generateimage")
+def api_generate_image(req: GenerateImageRequest) -> StreamingResponse:
+    """Generate an image directly via ComfyUI with live status streaming."""
+
+    def _stream() -> Iterable[str]:
+        if not _is_comfyui_running():
+            yield json.dumps({"type": "error", "detail": "ComfyUI is not running."}) + "\n"
+            return
+        prompt = (req.prompt or "").strip()
+        if not prompt:
+            yield json.dumps({"type": "error", "detail": "prompt is required"}) + "\n"
+            return
+
+        enhanced_prompt: Optional[str] = None
+        final_prompt = prompt
+        provider = req.provider or None
+
+        if not req.raw:
+            yield json.dumps({"type": "status", "text": "Enhancing prompt\u2026"}) + "\n"
+            try:
+                enhance_model = req.model or _active_model(provider)
+                enhance_messages: List[Dict[str, Any]] = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an image prompt enhancer. "
+                            "Take the user's brief description and rewrite it as a highly detailed, "
+                            "visually rich prompt for an AI image generator. "
+                            "Return only the enhanced prompt, nothing else."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+                enhanced_prompt = _llm_chat(enhance_messages, enhance_model, provider).strip()
+                if enhanced_prompt:
+                    final_prompt = enhanced_prompt
+                    yield json.dumps({"type": "enhanced_prompt", "prompt": enhanced_prompt}) + "\n"
+            except Exception:
+                enhanced_prompt = None  # fall back to original prompt silently
+
+        # Unload LLM if ComfyUI isn't loaded yet and VRAM is low.
+        if not _comfyui_model_loaded() and _normalize_provider(provider) != "openrouter":
+            free_vram = _get_free_vram_gb()
+            if free_vram is not None and free_vram < COMFYUI_VRAM_THRESHOLD_GB:
+                yield json.dumps({"type": "status", "text": f"Low VRAM ({free_vram:.1f}\u202fGB free) \u2014 unloading language model\u2026"}) + "\n"
+                for m in _ollama_running_models():
+                    _ollama_stop_model(m)
+                _comfyui_free_memory()
+                time.sleep(1)
+
+        yield json.dumps({"type": "status", "text": "Generating image\u2026"}) + "\n"
+
+        settings = _get_model_settings(COMFYUI_CHECKPOINT)
+        default_res = (settings.get("resolutions") or ["1024x1024"])[0]
+        try:
+            w, h = map(int, (req.resolution or default_res).split("x"))
+        except ValueError:
+            w, h = 1024, 1024
+        COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
+        try:
+            from comfyui_service import generate as _comfyui_generate
+            file_path = _comfyui_generate(
+                prompt=final_prompt,
+                negative_prompt=req.negative_prompt or "",
+                checkpoint=COMFYUI_CHECKPOINT,
+                width=w,
+                height=h,
+                steps=settings["steps"],
+                cfg=settings["cfg"],
+                sampler=settings["sampler"],
+                scheduler=settings["scheduler"],
+                output_dir=COMFYUI_OUTPUT_DIR,
+                base_url=COMFYUI_BASE_URL,
+                workflow_json=settings.get("workflow_json"),
+                session_id="direct",
+            )
+            global _comfyui_model_in_vram
+            _comfyui_model_in_vram = True
+            filename = Path(file_path).name
+            image_url = f"/generated_images/direct/{filename}"
+            yield json.dumps({"type": "image_ready", "url": image_url, "enhanced_prompt": enhanced_prompt}) + "\n"
+        except Exception as exc:
+            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson")
+
+
 def comfyui_validate_workflow(body: Dict[str, Any]) -> Dict[str, Any]:
     """Parse a workflow JSON string and report any missing custom nodes."""
     workflow_json_str = (body.get("workflow_json") or "").strip()

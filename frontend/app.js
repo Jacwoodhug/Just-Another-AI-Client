@@ -735,6 +735,9 @@ function createImageGroupItem(role, dataUrls, personalityName) {
   meta.className = "meta";
   meta.textContent = role === "user" ? "You" : (personalityName && personalityName !== "default" ? personalityName : "Assistant");
   if (personalityName && personalityName !== "default") item.dataset.personality = personalityName;
+  const grid = document.createElement("div");
+  grid.className = "image-grid";
+  grid.dataset.count = String(Math.min(dataUrls.length, 4));
 
   item.appendChild(meta);
   item.appendChild(grid);
@@ -3397,6 +3400,105 @@ const SLASH_COMMANDS = [
       }
     },
   },
+  {
+    name: "/generateimage",
+    desc: 'Generate an image — /generateimage "prompt" [--res 1024x1024] [--raw]',
+    requiresInput: true,
+    async execute(args = "") {
+      args = args.trim();
+      const rawFlag = /--raw(?=\s|$)/.test(args);
+      const resMatch = args.match(/--res\s+(\d+x\d+)/);
+      const resolution = resMatch ? resMatch[1] : undefined;
+      let argsClean = args
+        .replace(/\s*--raw(?=\s|$)/, "")
+        .replace(/\s*--res\s+\d+x\d+/, "")
+        .trim();
+      const quotedMatch = argsClean.match(/^"([\s\S]+)"$/);
+      const prompt = quotedMatch ? quotedMatch[1] : argsClean;
+      if (!prompt) {
+        addChat("assistant", 'Usage: /generateimage "your prompt here" [--res 1024x1024] [--raw]');
+        return;
+      }
+      const flags = [resolution ? `--res ${resolution}` : null, rawFlag ? "--raw" : null].filter(Boolean).join(" ");
+      const displayArgs = flags ? `"${prompt}" ${flags}` : `"${prompt}"`;
+      addChat("user", `/generateimage ${displayArgs}`);
+      // Reset image group state so this command always gets its own group entry
+      _currentImageGroupItem = null;
+      _currentImageGroupGrid = null;
+      _currentImageGroupCount = 0;
+      _imageGenTotal = 0;
+      _currentImageGroupSaveId = null;
+      _currentImageGroupDataUrls = [];
+      addGeneratingStatus(rawFlag ? "Generating image\u2026" : "Enhancing prompt\u2026");
+
+      const _clearStatus = () => {
+        if (_generatingStatusItem && _generatingStatusItem.parentNode) {
+          _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
+          _generatingStatusItem = null;
+        }
+      };
+
+      try {
+        const model = modelSelect ? modelSelect.value : undefined;
+        const r = await fetch("/api/generateimage", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            raw: rawFlag,
+            resolution: resolution || undefined,
+            model: model || undefined,
+            provider: currentProvider || undefined,
+          }),
+        });
+
+        if (!r.ok || !r.body) {
+          _clearStatus();
+          const errText = await r.text().catch(() => r.statusText);
+          addChat("assistant", `Error: ${errText}`);
+          return;
+        }
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let enhanced_prompt = null;
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() || "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let msg;
+            try { msg = JSON.parse(trimmed); } catch (_) { continue; }
+
+            if (msg.type === "status") {
+              addGeneratingStatus(msg.text);
+            } else if (msg.type === "enhanced_prompt") {
+              enhanced_prompt = msg.prompt;
+              addGeneratingStatus(`Generating image\u2026`);
+              addChat("assistant", `**Enhanced prompt:** ${msg.prompt}`);
+            } else if (msg.type === "image_ready") {
+              _clearStatus();
+              addToImageGroup(msg.url);
+              addChat("assistant", "Image generated.");
+            } else if (msg.type === "error") {
+              _clearStatus();
+              addChat("assistant", `Error: ${msg.detail}`);
+            }
+          }
+        }
+        _clearStatus();
+      } catch (e) {
+        _clearStatus();
+        addChat("assistant", `Error: ${e.message}`);
+      }
+    },
+  },
 ];
 
 const slashMenu = document.getElementById("slashMenu");
@@ -3432,10 +3534,27 @@ function updateSlashActive(idx) {
 }
 
 function applySlashCommand(cmd) {
-  textInput.value = "";
   slashMenu.hidden = true;
   slashActive = -1;
-  cmd.execute();
+  if (cmd.requiresInput) {
+    textInput.value = cmd.name + " ";
+    textInput.focus();
+  } else {
+    textInput.value = "";
+    cmd.execute();
+  }
+}
+
+function tryDispatchSlashCommand(value) {
+  const trimmed = value.trim();
+  for (const cmd of SLASH_COMMANDS) {
+    if (trimmed === cmd.name || trimmed.startsWith(cmd.name + " ")) {
+      const args = trimmed.slice(cmd.name.length).trim();
+      cmd.execute(args);
+      return true;
+    }
+  }
+  return false;
 }
 
 textInput.addEventListener("input", () => {
@@ -3462,6 +3581,11 @@ sendBtn.addEventListener("click", () => {
   }
   const value = textInput.value;
   textInput.value = "";
+  if (tryDispatchSlashCommand(value)) {
+    resetThinkingTimer();
+    resetIdleCaptureTimer();
+    return;
+  }
   sendText(value);
   resetThinkingTimer();
   resetIdleCaptureTimer();
@@ -3479,7 +3603,18 @@ textInput.addEventListener("keydown", (event) => {
       updateSlashActive((slashActive - 1 + slashFiltered.length) % slashFiltered.length);
       return;
     }
-    if (event.key === "Tab" || (event.key === "Enter" && slashActive >= 0)) {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      const cmd = slashFiltered[slashActive >= 0 ? slashActive : 0];
+      if (cmd) {
+        textInput.value = cmd.name + " ";
+        textInput.focus();
+        slashMenu.hidden = true;
+        slashActive = -1;
+      }
+      return;
+    }
+    if (event.key === "Enter" && slashActive >= 0) {
       event.preventDefault();
       const cmd = slashFiltered[slashActive] || slashFiltered[0];
       if (cmd) applySlashCommand(cmd);
@@ -3494,6 +3629,11 @@ textInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     const value = textInput.value;
     textInput.value = "";
+    if (tryDispatchSlashCommand(value)) {
+      resetThinkingTimer();
+      resetIdleCaptureTimer();
+      return;
+    }
     sendText(value);
     resetThinkingTimer();
     resetIdleCaptureTimer();
