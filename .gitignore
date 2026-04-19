@@ -16,6 +16,9 @@ python\ 3.12/
 backend/*.sqlite3
 backend/memories*.yaml
 
+ComfyUI/
+generated_images/
+
 # IDEs
 .vscode/
 .idea/

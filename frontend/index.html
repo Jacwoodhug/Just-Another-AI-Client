@@ -45,8 +45,7 @@
     </aside>
     <main class="shell">
       <header class="brand">
-        <div class="title">Signal Room</div>
-        <p class="subtitle">Always-on mic, speak when you need to.</p>
+        <div class="title">AI Voice Chat</div>
       </header>
 
       <section class="status">
@@ -98,6 +97,7 @@
           <span class="label">Listening</span>
           <span id="interimText">...</span>
         </div>
+        <div class="chat-resize-handle" id="chatResizeHandle" title="Drag to resize chat"></div>
       </section>
 
       <section class="controls">
@@ -107,7 +107,12 @@
       </section>
 
       <section class="composer">
-        <input id="textInput" type="text" placeholder="Type a message if you prefer" />
+        <div class="composer-input-wrap">
+          <div class="slash-menu" id="slashMenu" hidden>
+            <ul class="slash-list" id="slashList"></ul>
+          </div>
+          <input id="textInput" type="text" placeholder="Type a message if you prefer" autocomplete="off" />
+        </div>
         <button class="primary" id="sendBtn">Send</button>
       </section>
 
@@ -166,6 +171,14 @@
         <pre id="thinkingContext" class="thinking-context" hidden></pre>
       </div>
       <div class="thinking-footer">
+        <span id="thinkingVram" class="thinking-vram" title="GPU VRAM usage">
+          <svg class="vram-pie" id="thinkingVramPie" viewBox="0 0 20 20">
+            <circle class="vram-pie-bg" cx="10" cy="10" r="8"/>
+            <circle class="vram-pie-fill" id="thinkingVramArc" cx="10" cy="10" r="8"
+              stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/>
+          </svg>
+          <span id="thinkingVramLabel">VRAM —</span>
+        </span>
         <span id="thinkingTokenEstimate">~0 tokens</span>
       </div>
     </aside>
@@ -204,6 +217,100 @@
             <button class="small" id="kokoroToggleBtn" type="button" disabled>Launch</button>
           </div>
         </div>
+        <div class="setting-section">
+          <div class="setting-row">
+            <label class="setting-label">
+              ComfyUI Image Service
+              <span class="comfyui-status-dot" id="comfyuiStatusDot"></span>
+              <span class="kokoro-status-text" id="comfyuiStatusText">Checking…</span>
+            </label>
+            <button class="small" id="comfyuiToggleBtn" type="button" disabled>Launch</button>
+          </div>
+          <div class="setting-row" style="margin-top:10px">
+            <label class="setting-label" style="flex:1">Checkpoint</label>
+            <select id="comfyuiCheckpointSelect"></select>
+            <button class="small" id="comfyuiRefreshModelsBtn" type="button">↻</button>
+          </div>
+          <div id="comfyuiModelSettingsForm" style="margin-top:10px;display:none">
+            <div class="setting-row">
+              <label class="setting-label" style="flex:1">Steps</label>
+              <input type="number" id="comfyuiStepsInput" min="1" max="150" value="20" style="flex:2">
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" style="flex:1">CFG Scale</label>
+              <input type="number" id="comfyuiCfgInput" min="1" max="30" step="0.5" value="7" style="flex:2">
+            </div>
+            <div class="setting-row" style="margin-top:2px">
+              <label class="setting-label" style="flex:1">Sampler</label>
+              <select id="comfyuiSamplerInput" style="flex:2">
+                <option value="euler">euler</option>
+                <option value="euler_cfg_pp">euler_cfg_pp</option>
+                <option value="euler_ancestral">euler_ancestral</option>
+                <option value="euler_ancestral_cfg_pp">euler_ancestral_cfg_pp</option>
+                <option value="heun">heun</option>
+                <option value="heun2">heun2</option>
+                <option value="dpm_2">dpm_2</option>
+                <option value="dpm_2_ancestral">dpm_2_ancestral</option>
+                <option value="lms">lms</option>
+                <option value="dpm_fast">dpm_fast</option>
+                <option value="dpm_adaptive">dpm_adaptive</option>
+                <option value="dpmpp_2s_ancestral">dpmpp_2s_ancestral</option>
+                <option value="dpmpp_sde">dpmpp_sde</option>
+                <option value="dpmpp_sde_gpu">dpmpp_sde_gpu</option>
+                <option value="dpmpp_2m">dpmpp_2m</option>
+                <option value="dpmpp_2m_cfg_pp">dpmpp_2m_cfg_pp</option>
+                <option value="dpmpp_2m_sde">dpmpp_2m_sde</option>
+                <option value="dpmpp_2m_sde_gpu">dpmpp_2m_sde_gpu</option>
+                <option value="dpmpp_3m_sde">dpmpp_3m_sde</option>
+                <option value="dpmpp_3m_sde_gpu">dpmpp_3m_sde_gpu</option>
+                <option value="ddpm">ddpm</option>
+                <option value="lcm">lcm</option>
+                <option value="ipndm">ipndm</option>
+                <option value="ipndm_v">ipndm_v</option>
+                <option value="deis">deis</option>
+                <option value="ddim">ddim</option>
+                <option value="uni_pc">uni_pc</option>
+                <option value="uni_pc_bh2">uni_pc_bh2</option>
+              </select>
+            </div>
+            <div class="setting-row" style="margin-top:2px">
+              <label class="setting-label" style="flex:1">Scheduler</label>
+              <select id="comfyuiSchedulerInput" style="flex:2">
+                <option value="normal">normal</option>
+                <option value="karras">karras</option>
+                <option value="exponential">exponential</option>
+                <option value="sgm_uniform">sgm_uniform</option>
+                <option value="simple">simple</option>
+                <option value="ddim_uniform">ddim_uniform</option>
+                <option value="beta">beta</option>
+                <option value="linear_quadratic">linear_quadratic</option>
+                <option value="kl_optimal">kl_optimal</option>
+              </select>
+            </div>
+            <div class="setting-row" style="align-items:flex-start">
+              <label class="setting-label" style="flex:1;padding-top:4px">Resolutions</label>
+              <div style="flex:2">
+                <div id="comfyuiResolutionList"></div>
+                <button class="small" id="comfyuiAddResolutionBtn" type="button" style="margin-top:4px">+ Add</button>
+              </div>
+            </div>
+            <details style="margin-top:12px">
+              <summary style="cursor:pointer;font-size:13px;color:var(--muted)">Custom Workflow JSON (Advanced)</summary>
+              <div style="margin-top:8px">
+                <textarea id="comfyuiWorkflowJsonTextarea" rows="8"
+                  placeholder='Paste ComfyUI API-format workflow JSON here. Use __PROMPT__ and __NEGATIVE_PROMPT__ as placeholders.'
+                  style="width:100%;font-size:11px;font-family:monospace;resize:vertical;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px"></textarea>
+                <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                  <button class="small" id="comfyuiValidateWorkflowBtn" type="button">Validate</button>
+                  <span id="comfyuiValidateResult" style="font-size:12px;color:var(--muted)"></span>
+                </div>
+              </div>
+            </details>
+            <div style="margin-top:14px;text-align:right">
+              <button class="small" id="comfyuiSaveSettingsBtn" type="button">Save Settings</button>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="modal-body" id="personalityEditor" hidden>
         <div class="setting-section-header" style="margin-bottom:16px">
@@ -238,7 +345,22 @@
     </div>
   </div>
 
+  <!-- Image lightbox -->
+  <div class="lightbox-backdrop" id="lightboxBackdrop" hidden aria-modal="true" role="dialog" aria-label="Image viewer">
+    <div class="lightbox-toolbar">
+      <button class="lightbox-btn" id="lightboxZoomOut" type="button" aria-label="Zoom out">&#8722;</button>
+      <span class="lightbox-zoom-label" id="lightboxZoomLabel">100%</span>
+      <button class="lightbox-btn" id="lightboxZoomIn" type="button" aria-label="Zoom in">&#43;</button>
+      <button class="lightbox-btn lightbox-close" id="lightboxClose" type="button" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="lightbox-stage" id="lightboxStage">
+      <img class="lightbox-img" id="lightboxImg" src="" alt="Enlarged image" draggable="false" />
+    </div>
+  </div>
+
   <button class="settings-btn" id="settingsBtn" type="button" aria-label="Settings">&#9881;</button>
+
+  <div id="serviceToasts" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
 </body>

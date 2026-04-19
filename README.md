@@ -3,9 +3,49 @@
 A local-first voice chat web UI that sends transcribed speech to an Ollama LLM (or OpenRouter), lets the model stay silent if it wants, and stores long-term RAG memory in SQLite.
 
 ## Requirements
-- Python 3.10+
+- Python 3.12 (main backend)
+- Python 3.11 (Kokoro TTS - only if using Kokoro)
+- [Python Launcher for Windows](https://docs.python.org/3/using/windows.html) (`py`) with both versions installed
 - Ollama running locally
+- Git (for ComfyUI setup)
 - A browser that supports the Web Speech API (Chrome works well)
+
+## Setup
+
+### 1. Main Backend (Python 3.12)
+Creates `.venv` with Python 3.12, installs backend dependencies:
+```powershell
+.\run_setup_main.ps1
+```
+
+### 2. Kokoro TTS (Python 3.11, optional)
+Creates `.venv-kokoro` with Python 3.11, installs PyTorch + Kokoro TTS:
+```powershell
+.\run_setup_kokoroTTS.ps1
+```
+
+### 3. ComfyUI Image Generation (optional)
+If you already have ComfyUI installed elsewhere, skip this script and just set `COMFYUI_DIR` in `backend/.env` to your existing installation path:
+```
+COMFYUI_DIR=D:/path/to/your/ComfyUI
+```
+
+If not, this clones ComfyUI into a `ComfyUI/` folder and installs its requirements into the main `.venv`:
+```powershell
+.\run_setup_comfyui.ps1
+```
+After setup, place your checkpoint files (`.safetensors`) in `ComfyUI/models/checkpoints/`.
+
+If you installed via the setup script, you can leave `COMFYUI_DIR=` blank in `.env` - the backend will automatically detect the `ComfyUI/` folder in the project root.
+
+### 4. Pull Ollama models
+```powershell
+ollama pull llama3.1:8b
+ollama pull nomic-embed-text
+```
+
+### 5. Configure
+Copy `backend/.env.example` to `backend/.env` and edit as needed. See the Configuration section below.
 
 ## Basic Run Commands Post Setup
 
@@ -31,30 +71,15 @@ or
 .run_kokoro.ps1
 ```
 
-## Setup
-1. Install dependencies:
+## Manual Setup (alternative)
+If you prefer not to use the setup scripts:
 
 ```powershell
 cd backend
-python -m venv .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
-
-2. Pull models:
-
-```powershell
-ollama pull llama3.1:8b
-ollama pull nomic-embed-text
-```
-
-3. Run the server:
-
-```powershell
-uvicorn app:app --reload
-```
-
-4. Open `http://localhost:8000` in your browser.
 
 ## Configuration
 You can set environment variables or create `backend/.env` for local config.
@@ -88,6 +113,10 @@ Available variables:
 - `OPENROUTER_APP_URL` (optional header for OpenRouter)
 - `OPENROUTER_FREE_ONLY` (filter model list to free models, default: `true`)
 - `KOKORO_BASE_URL` (Kokoro TTS service URL, default: `http://localhost:5005`)
+- `COMFYUI_DIR` (path to ComfyUI installation, e.g. `D:/1Software/AI VC Test/ai-vc-test/ComfyUI`)
+- `COMFYUI_MODELS_PATH` (optional override path to checkpoints folder; auto-detected from `COMFYUI_DIR/models/checkpoints` if blank)
+- `COMFYUI_PORT` (ComfyUI listen port, default: `8188`)
+- `COMFYUI_VRAM_THRESHOLD_GB` (free VRAM needed before skipping Ollama unload, default: `10`)
 
 ## Using OpenRouter
 1. Set `LLM_PROVIDER=openrouter`.
@@ -97,8 +126,12 @@ Available variables:
 Note: embeddings for memory still use Ollama (`OLLAMA_EMBED_MODEL`), so Ollama needs to be available even when chat uses OpenRouter.
 
 ## Kokoro TTS (optional)
-Run the Kokoro service in a separate Python 3.11 venv (see `backend/kokoro_service.py`), then toggle the TTS provider in the UI.
+Run `.\run_setup_kokoroTTS.ps1` to set up the Kokoro venv, then start the service with `.\run_kokoro.ps1` or toggle it from the UI.
 Set `KOKORO_BASE_URL` if you run the service on a different host/port.
+
+## ComfyUI Image Generation (optional)
+Run `.\run_setup_comfyui.ps1` to clone and install ComfyUI. Start/stop it from the UI or via the API (`POST /api/comfyui/start`).
+The LLM can call the `generateImage` tool when a user asks to create an image. VRAM is managed automatically - Ollama models are unloaded if free VRAM is below the threshold.
 
 ## Behavior notes
 - The mic stays on and only sends text when speech is finalized by the browser.

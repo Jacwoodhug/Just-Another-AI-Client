@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -51,9 +54,38 @@ OPENROUTER_FREE_ONLY = os.getenv("OPENROUTER_FREE_ONLY", "true").lower() in (
 KOKORO_BASE_URL = os.getenv("KOKORO_BASE_URL", "http://localhost:5005").rstrip("/")
 KOKORO_PORT = os.getenv("KOKORO_PORT", "5005")
 
+COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://localhost:8188").rstrip("/")
+COMFYUI_PORT = os.getenv("COMFYUI_PORT", "8188")
+_comfyui_dir_env = os.getenv("COMFYUI_DIR", "").strip()
+if _comfyui_dir_env:
+    COMFYUI_DIR = _comfyui_dir_env
+else:
+    _default_comfyui = BASE_DIR.parent / "ComfyUI"
+    COMFYUI_DIR = str(_default_comfyui) if _default_comfyui.is_dir() else ""
+COMFYUI_MODELS_PATH = os.getenv("COMFYUI_MODELS_PATH", "").strip()
+COMFYUI_VRAM_THRESHOLD_GB = float(os.getenv("COMFYUI_VRAM_THRESHOLD_GB", "10"))
+COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
+COMFYUI_SETTINGS_FILE = BASE_DIR / "comfyui_settings.json"
+
+# Load active checkpoint from persisted settings (fallback to default)
+def _load_active_checkpoint() -> str:
+    if COMFYUI_SETTINGS_FILE.exists():
+        try:
+            data = json.loads(COMFYUI_SETTINGS_FILE.read_text(encoding="utf-8"))
+            ckpt = data.get("_active_checkpoint", "").strip()
+            if ckpt:
+                return ckpt
+        except Exception:
+            pass
+    return "sd_xl_base_1.0.safetensors"
+
+COMFYUI_CHECKPOINT: str = _load_active_checkpoint()
+
 # ---------------------------------------------------------------------------
 # Kokoro subprocess management
 # ---------------------------------------------------------------------------
+_DETACH_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 _kokoro_process: Optional[subprocess.Popen] = None
 
 
@@ -86,18 +118,65 @@ def _is_kokoro_running() -> bool:
 def _stop_kokoro() -> None:
     """Terminate the managed Kokoro subprocess if running."""
     global _kokoro_process
-    if _kokoro_process is None:
-        return
-    try:
-        _kokoro_process.terminate()
+    if _kokoro_process is not None:
         try:
-            _kokoro_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _kokoro_process.kill()
-            _kokoro_process.wait(timeout=3)
+            _kokoro_process.terminate()
+            try:
+                _kokoro_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kokoro_process.kill()
+                _kokoro_process.wait(timeout=3)
+        except Exception:
+            pass
+        _kokoro_process = None
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI subprocess management
+# ---------------------------------------------------------------------------
+_comfyui_process: Optional[subprocess.Popen] = None
+
+
+def _main_venv_python() -> Optional[str]:
+    """Return the path to the main .venv Python executable, or None."""
+    if sys.platform == "win32":
+        candidate = BASE_DIR / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = BASE_DIR / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else None
+
+
+def _comfyui_health_check() -> bool:
+    """Return True if ComfyUI responds to a health check."""
+    try:
+        r = requests.get(f"{COMFYUI_BASE_URL}/system_stats", timeout=2)
+        return r.status_code == 200
     except Exception:
-        pass
-    _kokoro_process = None
+        return False
+
+
+def _is_comfyui_running() -> bool:
+    """Check whether the ComfyUI service is reachable."""
+    global _comfyui_process
+    if _comfyui_process is not None and _comfyui_process.poll() is not None:
+        _comfyui_process = None
+    return _comfyui_health_check()
+
+
+def _stop_comfyui() -> None:
+    """Terminate the managed ComfyUI subprocess if running."""
+    global _comfyui_process
+    if _comfyui_process is not None:
+        try:
+            _comfyui_process.terminate()
+            try:
+                _comfyui_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _comfyui_process.kill()
+                _comfyui_process.wait(timeout=3)
+        except Exception:
+            pass
+        _comfyui_process = None
 
 
 _SYSTEM_PROMPT_PRE_TONE = (
@@ -116,6 +195,7 @@ _SYSTEM_PROMPT_PRE_TONE = (
     "You have access to tools. Use them when appropriate:\n"
     "- webSearch: search the web when you need current information, facts, or anything you're unsure about.\n"
     "- requestScreenshot: request a screenshot when you need to see what's on the user's screen.\n"
+    "- generateImage: generate an image using AI. Use when the user asks to create, draw, or generate a picture. After it runs, always reply in [SPOKEN] confirming the image is ready.\n"
     "- memoryStore: store a durable fact about the user (preferences, habits, long-term info). Not for transient moods.\n"
     "  When the user says 'remember this', 'remember that', 'don't forget', 'keep in mind', or similar, ALWAYS use memoryStore to save the relevant fact.\n"
     "  Also use memoryStore proactively when the user reveals a preference, habit, or important personal detail worth retaining.\n"
@@ -197,7 +277,7 @@ def build_system_prompt(tone_context=None):
 
 # ── Tool definitions (Ollama / OpenAI function-calling format) ────────────
 
-TOOL_DEFINITIONS = [
+TOOL_DEFINITIONS_BASE = [
     {
         "type": "function",
         "function": {
@@ -285,6 +365,40 @@ TOOL_DEFINITIONS = [
 ]
 
 
+def _build_tool_definitions(checkpoint: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return tool definitions including a dynamic generateImage tool."""
+    tools = list(TOOL_DEFINITIONS_BASE)
+    cp = checkpoint or COMFYUI_CHECKPOINT
+    settings = _get_model_settings(cp)
+    res_enum = _derive_resolution_enum(settings.get("resolutions", ["1024x1024"]))
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": "generateImage",
+            "description": "Generate an image using AI. Use when the user asks to create, draw, or generate a picture or image.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed positive image description.",
+                    },
+                    "negative_prompt": {
+                        "type": "string",
+                        "description": "What to exclude from the image.",
+                    },
+                    "resolution": {
+                        "type": "string",
+                        "enum": res_enum,
+                        "description": f"Output resolution as WxH. Options: {', '.join(res_enum)}.",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    })
+    return tools
+
 
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
@@ -329,6 +443,9 @@ class TTSVoicesResponse(BaseModel):
 
 
 app = FastAPI(title="Ollama Voice Chat")
+
+
+
 store = MemoryStore(str(DB_PATH))
 _personality_stores: Dict[str, MemoryStore] = {}
 
@@ -355,6 +472,17 @@ def _get_yaml_store(personality_id: Optional[str]) -> YamlMemoryStore:
 
 
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
+# Suppress /api/vram from uvicorn access log (high-frequency polling)
+class _NoVramFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "/api/vram" not in record.getMessage()
+
+logging.getLogger("uvicorn.access").addFilter(_NoVramFilter())
+
+# Serve generated images statically
+COMFYUI_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/generated_images", StaticFiles(directory=str(COMFYUI_OUTPUT_DIR)), name="generated_images")
 
 
 @app.get("/")
@@ -782,6 +910,35 @@ def _execute_tool(
             return f"Deleted memory {entry_id}.", False
         return f"Memory {entry_id} not found.", False
 
+    if name == "generateImage":
+        if not _is_comfyui_running():
+            return "Error: ComfyUI is not running.", False
+        prompt = str(args.get("prompt", "")).strip()
+        if not prompt:
+            return "Error: missing prompt parameter.", False
+        negative_prompt = str(args.get("negative_prompt", ""))
+        resolution = str(args.get("resolution", "1024x1024"))
+        try:
+            w, h = map(int, resolution.split("x"))
+        except ValueError:
+            w, h = 1024, 1024
+
+        settings = _get_model_settings(COMFYUI_CHECKPOINT)
+        COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
+        try:
+            from comfyui_service import generate as _comfyui_generate
+            file_path = _comfyui_generate(
+                prompt=prompt, negative_prompt=negative_prompt,
+                checkpoint=COMFYUI_CHECKPOINT, width=w, height=h,
+                steps=settings["steps"], cfg=settings["cfg"],
+                sampler=settings["sampler"], scheduler=settings["scheduler"],
+                output_dir=COMFYUI_OUTPUT_DIR, base_url=COMFYUI_BASE_URL,
+                workflow_json=settings.get("workflow_json"),
+            )
+            return f"__IMAGE_GENERATED__:{file_path}", False
+        except Exception as exc:
+            return f"Image generation failed: {exc}", False
+
     return f"Unknown tool: {name}", False
 
 
@@ -937,11 +1094,16 @@ def _run_tool_loop(
             return content, tool_calls_made, screenshot_requested, screenshot_reason
 
         results: List[Tuple[str, str, str]] = []
+        image_path_for_injection: Optional[str] = None
         for tc in raw_tool_calls:
             name, args, call_id = _normalize_tool_call(tc, provider)
             result_text, is_screenshot = _execute_tool(
                 name, args, active_yaml_store, search_method
             )
+
+            if result_text.startswith("__IMAGE_GENERATED__:"):
+                image_path_for_injection = result_text[len("__IMAGE_GENERATED__:"):]
+                result_text = f"Image generated: {image_path_for_injection}"
 
             tool_calls_made.append({
                 "name": name,
@@ -958,11 +1120,158 @@ def _run_tool_loop(
 
         _append_tool_result_messages(messages, data, raw_tool_calls, results, provider)
 
+        if image_path_for_injection and _ollama_model_is_multimodal(model):
+            import base64 as _b64
+            img_bytes = Path(image_path_for_injection).read_bytes()
+            b64 = _b64.b64encode(img_bytes).decode()
+            messages.append({
+                "role": "user",
+                "content": "Here is the generated image:",
+                "images": [b64],
+            })
+
         if screenshot_requested:
             return "", tool_calls_made, True, screenshot_reason
 
     content = _get_content_from_response(data, provider)
     return content, tool_calls_made, screenshot_requested, screenshot_reason
+
+
+# ---------------------------------------------------------------------------
+# VRAM and model helpers
+# ---------------------------------------------------------------------------
+
+def _get_free_vram_gb() -> Optional[float]:
+    """Return free GPU VRAM in GB via nvidia-smi, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        line = result.stdout.strip().split("\n")[0]
+        return float(line) / 1024.0
+    except Exception:
+        return None
+
+
+def _comfyui_free_memory() -> None:
+    """Ask ComfyUI to unload models and free memory."""
+    try:
+        requests.post(
+            f"{COMFYUI_BASE_URL}/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _ollama_warm_model(model: str) -> None:
+    """Pre-load an Ollama model into VRAM without generating output."""
+    try:
+        requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": model, "prompt": "", "keep_alive": "10m"},
+            timeout=60,
+        )
+    except Exception:
+        pass
+
+
+def _ollama_model_is_multimodal(model: str) -> bool:
+    """Return True if the Ollama model has 'clip' in its families (i.e. is multimodal)."""
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/show",
+            json={"model": model},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        details = resp.json().get("details", {})
+        families = details.get("families") or []
+        return "clip" in families
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Per-model ComfyUI settings
+# ---------------------------------------------------------------------------
+
+_COMFYUI_DEFAULT_SETTINGS = {
+    "steps": 20,
+    "cfg": 7.0,
+    "sampler": "euler",
+    "scheduler": "normal",
+    "resolutions": ["1024x1024"],
+    "workflow_json": None,
+}
+
+
+def _get_model_files() -> List[str]:
+    """Return sorted list of checkpoint filenames from all known model dirs."""
+    if COMFYUI_MODELS_PATH:
+        # Explicit override: scan only that directory
+        dirs = [Path(COMFYUI_MODELS_PATH)]
+    elif COMFYUI_DIR:
+        # Scan both the classic and Flux-era locations
+        base = Path(COMFYUI_DIR) / "models"
+        dirs = [base / "checkpoints", base / "diffusion_models"]
+    else:
+        return []
+
+    extensions = {".safetensors", ".ckpt", ".pt"}
+    seen: set = set()
+    results = []
+    for d in dirs:
+        if d.is_dir():
+            for p in d.iterdir():
+                if p.suffix.lower() in extensions and p.name not in seen:
+                    seen.add(p.name)
+                    results.append(p.name)
+    return sorted(results)
+
+
+def _load_comfyui_settings() -> Dict[str, Any]:
+    """Read the ComfyUI per-model settings file (or return empty dict)."""
+    if COMFYUI_SETTINGS_FILE.exists():
+        return json.loads(COMFYUI_SETTINGS_FILE.read_text(encoding="utf-8"))
+    return {}
+
+
+def _save_comfyui_settings(data: Dict[str, Any]) -> None:
+    """Write the ComfyUI per-model settings file."""
+    COMFYUI_SETTINGS_FILE.write_text(
+        json.dumps(data, indent=2), encoding="utf-8"
+    )
+
+
+def _get_model_settings(checkpoint: str) -> Dict[str, Any]:
+    """Return merged defaults + stored settings for *checkpoint*."""
+    all_settings = _load_comfyui_settings()
+    stored = all_settings.get(checkpoint, {})
+    merged = dict(_COMFYUI_DEFAULT_SETTINGS)
+    merged.update(stored)
+    return merged
+
+
+def _derive_resolution_enum(resolutions: List[str]) -> List[str]:
+    """Expand resolutions so non-square entries get both orientations."""
+    result: List[str] = []
+    for res in resolutions:
+        if res not in result:
+            result.append(res)
+        try:
+            w, h = res.split("x")
+            if w != h:
+                flipped = f"{h}x{w}"
+                if flipped not in result:
+                    result.append(flipped)
+        except ValueError:
+            pass
+    return result
 
 
 def _ollama_running_models() -> List[str]:
@@ -982,9 +1291,13 @@ def _ollama_running_models() -> List[str]:
 
 
 def _ollama_stop_model(name: str) -> None:
-    url = f"{OLLAMA_BASE_URL}/api/stop"
+    """Unload a model from VRAM via keep_alive=0 (Ollama's documented unload mechanism)."""
     try:
-        requests.post(url, json={"name": name, "model": name}, timeout=10)
+        requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={"model": name, "keep_alive": 0},
+            timeout=30,
+        )
     except requests.RequestException:
         return
 
@@ -992,6 +1305,7 @@ def _ollama_stop_model(name: str) -> None:
 @app.on_event("shutdown")
 def shutdown_cleanup() -> None:
     _stop_kokoro()
+    _stop_comfyui()
     for model_name in _ollama_running_models():
         _ollama_stop_model(model_name)
 
@@ -1013,6 +1327,165 @@ def _ollama_chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[
             content = data.get("message", {}).get("content")
             if content:
                 yield content
+
+
+class _SectionStreamState:
+    """Route streaming tokens into spoken/silent channels based on [SPOKEN]/[SILENT] markers."""
+
+    _MARKERS = {"[SPOKEN]": "spoken", "[SILENT]": "silent"}
+
+    def __init__(self) -> None:
+        self._channel: Optional[str] = None
+        self._buf: str = ""
+
+    def feed(self, token: str) -> Tuple[str, str]:
+        """Feed a token; returns (spoken_out, silent_out) ready to emit."""
+        self._buf += token
+        spoken: List[str] = []
+        silent: List[str] = []
+
+        while self._buf:
+            best: Optional[Tuple[int, str, str]] = None
+            for marker, ch in self._MARKERS.items():
+                pos = self._buf.find(marker)
+                if pos >= 0 and (best is None or pos < best[0]):
+                    best = (pos, marker, ch)
+
+            if best is not None:
+                pos, marker, new_ch = best
+                pre = self._buf[:pos]
+                if pre:
+                    out_ch = self._channel or "spoken"
+                    (spoken if out_ch == "spoken" else silent).append(pre)
+                self._channel = new_ch
+                self._buf = self._buf[pos + len(marker):]
+                if self._buf.startswith("\n"):
+                    self._buf = self._buf[1:]
+                continue
+
+            # No complete marker — hold back any partial marker suffix.
+            hold = 0
+            for marker in self._MARKERS:
+                for length in range(1, len(marker)):
+                    if self._buf.endswith(marker[:length]):
+                        hold = max(hold, length)
+            safe_end = len(self._buf) - hold
+            if safe_end > 0:
+                emit = self._buf[:safe_end]
+                out_ch = self._channel or "spoken"
+                (spoken if out_ch == "spoken" else silent).append(emit)
+                self._buf = self._buf[safe_end:]
+            break
+
+        return "".join(spoken), "".join(silent)
+
+    def flush(self) -> Tuple[str, str]:
+        """Flush remaining buffer at end of stream."""
+        remaining, self._buf = self._buf, ""
+        if not remaining:
+            return "", ""
+        ch = self._channel or "spoken"
+        return (remaining, "") if ch == "spoken" else ("", remaining)
+
+
+def _ollama_stream_first_call(
+    messages: List[Dict[str, Any]], model: str, tools: List[Dict[str, Any]]
+) -> Iterable[Tuple[str, Any]]:
+    """Stream Ollama first call. Yields ("token", text) per chunk then ("final", data_dict)."""
+    url = f"{OLLAMA_BASE_URL}/api/chat"
+    payload = {"model": model, "messages": messages, "stream": True, "tools": tools}
+    with requests.post(url, json=payload, stream=True, timeout=120) as response:
+        response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if data.get("done"):
+                yield ("final", data)
+                return
+            content = data.get("message", {}).get("content") or ""
+            if content:
+                yield ("token", content)
+
+
+def _openrouter_stream_first_call(
+    messages: List[Dict[str, Any]], model: str, tools: List[Dict[str, Any]]
+) -> Iterable[Tuple[str, Any]]:
+    """Stream OpenRouter first call. Yields ("token", text) per chunk then ("final", data_dict)."""
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    payload = {
+        "model": model,
+        "messages": _openrouter_messages(messages),
+        "stream": True,
+        "tools": tools if tools else None,
+    }
+    accumulated_tool_calls: Dict[int, Dict[str, Any]] = {}
+    full_content = ""
+    with requests.post(
+        url, headers=_openrouter_headers(), json=payload, stream=True, timeout=120
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[5:].strip()
+            if data_str == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta", {})
+            content = delta.get("content") or ""
+            if content:
+                full_content += content
+                yield ("token", content)
+            for tc_delta in (delta.get("tool_calls") or []):
+                idx = tc_delta.get("index", 0)
+                if idx not in accumulated_tool_calls:
+                    accumulated_tool_calls[idx] = {
+                        "id": tc_delta.get("id", ""),
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    }
+                tc = accumulated_tool_calls[idx]
+                func = tc_delta.get("function", {})
+                if func.get("name"):
+                    tc["function"]["name"] += func["name"]
+                if func.get("arguments"):
+                    tc["function"]["arguments"] += func["arguments"]
+                if tc_delta.get("id"):
+                    tc["id"] = tc_delta["id"]
+
+    tool_calls_list = [accumulated_tool_calls[i] for i in sorted(accumulated_tool_calls)]
+    yield ("final", {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": full_content,
+                "tool_calls": tool_calls_list or None,
+            }
+        }]
+    })
+
+
+def _llm_stream_first_call(
+    messages: List[Dict[str, Any]],
+    model: str,
+    tools: List[Dict[str, Any]],
+    provider: Optional[str] = None,
+) -> Iterable[Tuple[str, Any]]:
+    if _normalize_provider(provider) == "openrouter":
+        return _openrouter_stream_first_call(messages, model, tools)
+    return _ollama_stream_first_call(messages, model, tools)
+
+
 
 
 def _parse_sections(body: str) -> Tuple[str, str]:
@@ -1112,7 +1585,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     try:
         raw_content, tool_calls_made, screenshot_requested, screenshot_reason = (
             _run_tool_loop(
-                messages, TOOL_DEFINITIONS, selected_model, provider,
+                messages, _build_tool_definitions(COMFYUI_CHECKPOINT), selected_model, provider,
                 active_yaml_store, search_method,
             )
         )
@@ -1222,63 +1695,198 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         user_message["images"] = [image_base64]
     messages.append(user_message)
 
-    # Run tool loop non-streaming first
-    try:
-        raw_content, tool_calls_made, screenshot_requested, screenshot_reason = (
-            _run_tool_loop(
-                messages, TOOL_DEFINITIONS, selected_model, provider,
-                active_yaml_store, search_method,
-            )
-        )
-    except (requests.RequestException, RuntimeError) as exc:
-        def error_gen() -> Iterable[str]:
-            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
-        return StreamingResponse(error_gen(), media_type="application/x-ndjson")
+    tools = _build_tool_definitions(COMFYUI_CHECKPOINT)
 
-    context_debug = _build_context_debug(messages)
-
-    if screenshot_requested:
-        if not hidden and user_text != "[Thinking Tick]":
-            active_store.add_message(session_id, "user", user_text or "[Image]", None)
-
-        def generate_screenshot_request() -> Iterable[str]:
-            meta = {
-                "type": "meta",
-                "session_id": session_id,
-                "tool_calls_made": tool_calls_made,
-                "provider": provider,
-                "context_debug": context_debug,
-            }
-            yield json.dumps(meta) + "\n"
-            yield json.dumps(
-                {"type": "request_screenshot", "reason": screenshot_reason}
-            ) + "\n"
-            yield json.dumps(
-                {"type": "done", "spoken_text": "", "silent_text": ""}
-            ) + "\n"
-
-        return StreamingResponse(
-            generate_screenshot_request(), media_type="application/x-ndjson"
-        )
-
-    # If tool loop returned content directly (no streaming needed for final response),
-    # we still emit it as streamed tokens for wire-format compatibility.
     def generate() -> Iterable[str]:
-        meta = {
+        tool_calls_made: List[Dict[str, Any]] = []
+        screenshot_requested = False
+        screenshot_reason = ""
+        image_already_generated = False
+        spoken_text = ""
+        silent_text = ""
+
+        # Yield preliminary meta immediately so the frontend starts accepting tokens.
+        yield json.dumps({
             "type": "meta",
             "session_id": session_id,
-            "tool_calls_made": tool_calls_made,
+            "tool_calls_made": [],
             "provider": provider,
-            "context_debug": context_debug,
-        }
-        yield json.dumps(meta) + "\n"
+            "context_debug": "",
+        }) + "\n"
 
-        spoken_text, silent_text = _parse_sections(raw_content)
+        try:
+            # ── First call: streaming so tokens appear progressively ──
+            section_state = _SectionStreamState()
+            first_data: Optional[Dict[str, Any]] = None
 
-        if spoken_text:
-            yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
-        if silent_text:
-            yield json.dumps({"type": "token", "channel": "silent", "text": silent_text}) + "\n"
+            for event_type, value in _llm_stream_first_call(messages, selected_model, tools, provider):
+                if event_type == "token":
+                    sp, si = section_state.feed(value)
+                    if sp:
+                        spoken_text += sp
+                        yield json.dumps({"type": "token", "channel": "spoken", "text": sp}) + "\n"
+                    if si:
+                        silent_text += si
+                        yield json.dumps({"type": "token", "channel": "silent", "text": si}) + "\n"
+                elif event_type == "final":
+                    first_data = value
+
+            sp, si = section_state.flush()
+            if sp:
+                spoken_text += sp
+                yield json.dumps({"type": "token", "channel": "spoken", "text": sp}) + "\n"
+            if si:
+                silent_text += si
+                yield json.dumps({"type": "token", "channel": "silent", "text": si}) + "\n"
+
+            if first_data is None:
+                yield json.dumps({"type": "error", "detail": "No response from LLM"}) + "\n"
+                return
+
+            data = first_data
+            raw_tool_calls = _get_tool_calls_from_response(data, provider)
+
+            # ── Tool loop ──
+            # iteration_count 0 uses first_data (already streamed).
+            # Subsequent iterations use non-streaming _llm_chat_with_tools.
+            for iteration_count in range(6):
+                if not raw_tool_calls:
+                    if iteration_count > 0:
+                        # Final response from a post-tool non-streaming call.
+                        raw_content = _get_content_from_response(data, provider)
+                        spoken_text, silent_text = _parse_sections(raw_content)
+                        if spoken_text:
+                            yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
+                        if silent_text:
+                            yield json.dumps({"type": "token", "channel": "silent", "text": silent_text}) + "\n"
+                    break
+
+                results: List[Tuple[str, str, str]] = []
+                image_path_for_injection: Optional[str] = None
+
+                for tc in raw_tool_calls:
+                    name, args, call_id = _normalize_tool_call(tc, provider)
+                    is_screenshot = False
+
+                    if name == "generateImage":
+                        if image_already_generated:
+                            result_text = "Image was already generated. Please respond with a confirmation."
+                        elif not _is_comfyui_running():
+                            result_text = "Error: ComfyUI is not running."
+                        else:
+                            prompt_arg = str(args.get("prompt", "")).strip()
+                            if not prompt_arg:
+                                result_text = "Error: missing prompt parameter."
+                            else:
+                                negative_prompt_arg = str(args.get("negative_prompt", ""))
+                                resolution_arg = str(args.get("resolution", "1024x1024"))
+                                try:
+                                    w, h = map(int, resolution_arg.split("x"))
+                                except ValueError:
+                                    w, h = 1024, 1024
+
+                                settings = _get_model_settings(COMFYUI_CHECKPOINT)
+
+                                ollama_models_unloaded: List[str] = []
+                                if provider != "openrouter":
+                                    free_vram = _get_free_vram_gb()
+                                    if free_vram is not None and free_vram < COMFYUI_VRAM_THRESHOLD_GB:
+                                        yield json.dumps({
+                                            "type": "status",
+                                            "text": f"Low VRAM ({free_vram:.1f} GB free) — unloading language model…",
+                                        }) + "\n"
+                                        ollama_models_unloaded = _ollama_running_models()
+                                        for m in ollama_models_unloaded:
+                                            _ollama_stop_model(m)
+                                        _comfyui_free_memory()
+                                        time.sleep(1)
+
+                                yield json.dumps({"type": "status", "text": "Generating image…"}) + "\n"
+                                COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
+                                try:
+                                    from comfyui_service import generate as _comfyui_generate
+                                    file_path = _comfyui_generate(
+                                        prompt=prompt_arg, negative_prompt=negative_prompt_arg,
+                                        checkpoint=COMFYUI_CHECKPOINT, width=w, height=h,
+                                        steps=settings["steps"], cfg=settings["cfg"],
+                                        sampler=settings["sampler"], scheduler=settings["scheduler"],
+                                        output_dir=COMFYUI_OUTPUT_DIR, base_url=COMFYUI_BASE_URL,
+                                        workflow_json=settings.get("workflow_json"),
+                                    )
+                                    result_text = f"__IMAGE_GENERATED__:{file_path}"
+                                    image_already_generated = True
+                                except Exception as exc:
+                                    result_text = f"Image generation failed: {exc}"
+                                finally:
+                                    if ollama_models_unloaded:
+                                        yield json.dumps({
+                                            "type": "status",
+                                            "text": "Reloading language model…",
+                                        }) + "\n"
+                                        _comfyui_free_memory()
+                                        _ollama_warm_model(selected_model)
+                    else:
+                        result_text, is_screenshot = _execute_tool(
+                            name, args, active_yaml_store, search_method
+                        )
+
+                    if result_text.startswith("__IMAGE_GENERATED__:"):
+                        image_path_for_injection = result_text[len("__IMAGE_GENERATED__:"):]
+                        filename = Path(image_path_for_injection).name
+                        image_url = f"/generated_images/{filename}"
+                        result_text = (
+                            "Image successfully generated and is now displayed to the user in the chat. "
+                            "Respond with a [SPOKEN] message confirming the image is ready and briefly "
+                            "describing or commenting on what was generated."
+                        )
+                        yield json.dumps({"type": "image_ready", "url": image_url}) + "\n"
+
+                    tool_calls_made.append({
+                        "name": name,
+                        "args": args,
+                        "result_summary": result_text[:200] if len(result_text) > 200 else result_text,
+                    })
+
+                    if is_screenshot:
+                        screenshot_requested = True
+                        screenshot_reason = str(args.get("reason", "Model requested a screenshot"))
+                        result_text = "Screenshot has been requested from the user. It will be provided in a follow-up message."
+
+                    results.append((call_id, name, result_text))
+
+                _append_tool_result_messages(messages, data, raw_tool_calls, results, provider)
+
+                if image_path_for_injection and _ollama_model_is_multimodal(selected_model):
+                    import base64 as _b64
+                    img_bytes = Path(image_path_for_injection).read_bytes()
+                    b64 = _b64.b64encode(img_bytes).decode()
+                    messages.append({
+                        "role": "user",
+                        "content": "Here is the generated image:",
+                        "images": [b64],
+                    })
+
+                if screenshot_requested:
+                    break
+
+                data = _llm_chat_with_tools(messages, selected_model, tools, provider)
+                raw_tool_calls = _get_tool_calls_from_response(data, provider)
+
+        except Exception as exc:
+            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+            return
+
+        context_debug = _build_context_debug(messages)
+
+        if screenshot_requested:
+            if not hidden and user_text != "[Thinking Tick]":
+                active_store.add_message(session_id, "user", user_text or "[Image]", None)
+            yield json.dumps({"type": "request_screenshot", "reason": screenshot_reason}) + "\n"
+            yield json.dumps({
+                "type": "done", "spoken_text": "", "silent_text": "",
+                "tool_calls_made": tool_calls_made, "context_debug": context_debug,
+            }) + "\n"
+            return
 
         if not hidden and user_text != "[Thinking Tick]":
             active_store.add_message(
@@ -1298,9 +1906,13 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 session_id, "assistant", spoken_text, assistant_embedding
             )
 
-        yield json.dumps(
-            {"type": "done", "spoken_text": spoken_text, "silent_text": silent_text}
-        ) + "\n"
+        yield json.dumps({
+            "type": "done",
+            "spoken_text": spoken_text,
+            "silent_text": silent_text,
+            "tool_calls_made": tool_calls_made,
+            "context_debug": context_debug,
+        }) + "\n"
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
@@ -1357,6 +1969,8 @@ def delete_personality_memory(personality_id: str) -> Dict[str, bool]:
 
 @app.get("/api/tts/voices", response_model=TTSVoicesResponse)
 def list_tts_voices() -> TTSVoicesResponse:
+    if not _is_kokoro_running():
+        return TTSVoicesResponse(voices=[], default_voice="")
     url = f"{KOKORO_BASE_URL}/voices"
     try:
         response = requests.get(url, timeout=10)
@@ -1371,6 +1985,35 @@ def list_tts_voices() -> TTSVoicesResponse:
     if isinstance(data, dict):
         default_voice = str(data.get("default_voice", "")).strip()
     return TTSVoicesResponse(voices=voices, default_voice=default_voice)
+
+
+@app.get("/api/tts")
+def tts_proxy_get(text: str, voice: str = "", speed: Optional[float] = None) -> StreamingResponse:
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    payload: Dict[str, Any] = {"text": text}
+    if voice:
+        payload["voice"] = voice
+    if speed is not None:
+        payload["speed"] = speed
+    url = f"{KOKORO_BASE_URL}/tts"
+    try:
+        response = requests.post(url, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Kokoro TTS error: {exc}")
+    media_type = response.headers.get("Content-Type", "audio/wav").split(";")[0]
+
+    def stream_audio() -> Iterable[bytes]:
+        try:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        finally:
+            response.close()
+
+    return StreamingResponse(stream_audio(), media_type=media_type)
 
 
 @app.post("/api/tts")
@@ -1445,6 +2088,7 @@ def kokoro_start() -> Dict[str, str]:
             cwd=str(BASE_DIR),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            creationflags=_DETACH_FLAGS,
         )
     except Exception as exc:
         _kokoro_process = None
@@ -1474,3 +2118,194 @@ def kokoro_start() -> Dict[str, str]:
 def kokoro_stop() -> Dict[str, str]:
     _stop_kokoro()
     return {"status": "stopped"}
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI subprocess lifecycle endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/comfyui/status")
+def comfyui_status() -> Dict[str, Any]:
+    return {
+        "running": _is_comfyui_running(),
+        "available": bool(COMFYUI_DIR),
+        "managed": _comfyui_process is not None,
+    }
+
+
+@app.post("/api/comfyui/start")
+def comfyui_start() -> Dict[str, str]:
+    global _comfyui_process
+    if _is_comfyui_running():
+        raise HTTPException(status_code=409, detail="ComfyUI is already running")
+
+    if not COMFYUI_DIR:
+        raise HTTPException(
+            status_code=500,
+            detail="COMFYUI_DIR not configured in .env",
+        )
+
+    python_path = _main_venv_python()
+    if python_path is None:
+        raise HTTPException(
+            status_code=500, detail="Main .venv not found at backend/.venv"
+        )
+
+    main_py = Path(COMFYUI_DIR) / "main.py"
+    if not main_py.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"ComfyUI main.py not found at {main_py}",
+        )
+
+    try:
+        _comfyui_process = subprocess.Popen(
+            [
+                python_path,
+                str(main_py),
+                "--listen",
+                "127.0.0.1",
+                "--port",
+                COMFYUI_PORT,
+            ],
+            cwd=COMFYUI_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_DETACH_FLAGS,
+        )
+    except Exception as exc:
+        _comfyui_process = None
+        raise HTTPException(
+            status_code=500, detail=f"Failed to start ComfyUI: {exc}"
+        )
+
+    # Poll health endpoint until ready (up to ~120s)
+    for _ in range(240):
+        if _comfyui_process.poll() is not None:
+            _comfyui_process = None
+            raise HTTPException(
+                status_code=500, detail="ComfyUI process exited unexpectedly"
+            )
+        if _comfyui_health_check():
+            return {"status": "running"}
+        time.sleep(0.5)
+
+    _stop_comfyui()
+    raise HTTPException(
+        status_code=500, detail="ComfyUI did not become ready within 120 seconds"
+    )
+
+
+@app.post("/api/comfyui/stop")
+def comfyui_stop() -> Dict[str, str]:
+    _stop_comfyui()
+    return {"status": "stopped"}
+
+
+@app.get("/api/comfyui/models")
+def comfyui_models() -> Dict[str, Any]:
+    """List checkpoint files found in all known model directories."""
+    return {"models": _get_model_files()}
+
+
+@app.get("/api/comfyui/active-model")
+def comfyui_active_model_get() -> Dict[str, str]:
+    return {"checkpoint": COMFYUI_CHECKPOINT}
+
+
+@app.post("/api/comfyui/active-model")
+def comfyui_active_model_set(body: Dict[str, str]) -> Dict[str, str]:
+    global COMFYUI_CHECKPOINT
+    checkpoint = body.get("checkpoint", "").strip()
+    if not checkpoint:
+        raise HTTPException(status_code=400, detail="checkpoint is required")
+    COMFYUI_CHECKPOINT = checkpoint
+    # Persist to settings file
+    all_settings = _load_comfyui_settings()
+    all_settings["_active_checkpoint"] = checkpoint
+    _save_comfyui_settings(all_settings)
+    return {"checkpoint": COMFYUI_CHECKPOINT}
+
+
+@app.get("/api/comfyui/model-settings/{checkpoint}")
+def comfyui_model_settings_get(checkpoint: str) -> Dict[str, Any]:
+    return _get_model_settings(checkpoint)
+
+
+@app.put("/api/comfyui/model-settings/{checkpoint}")
+def comfyui_model_settings_put(checkpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    all_settings = _load_comfyui_settings()
+    allowed = {"steps", "cfg", "sampler", "scheduler", "resolutions", "workflow_json"}
+    filtered = {k: v for k, v in body.items() if k in allowed}
+    existing = all_settings.get(checkpoint, {})
+    existing.update(filtered)
+    all_settings[checkpoint] = existing
+    _save_comfyui_settings(all_settings)
+    return _get_model_settings(checkpoint)
+
+
+@app.get("/api/vram")
+def get_vram() -> Dict[str, Any]:
+    """Return GPU VRAM usage: used_gb, total_gb, or nulls if unavailable."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split("\n")[0].split(",")
+            used_gb = round(float(parts[0].strip()) / 1024.0, 2)
+            total_gb = round(float(parts[1].strip()) / 1024.0, 2)
+            return {"used_gb": used_gb, "total_gb": total_gb}
+    except Exception:
+        pass
+    return {"used_gb": None, "total_gb": None}
+
+
+@app.post("/api/cleanvram")
+def clean_vram() -> Dict[str, str]:
+    """Unload all Ollama models and free ComfyUI memory."""
+    for model_name in _ollama_running_models():
+        _ollama_stop_model(model_name)
+    _comfyui_free_memory()
+    return {"status": "ok"}
+
+
+@app.post("/api/comfyui/validate-workflow")
+def comfyui_validate_workflow(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a workflow JSON string and report any missing custom nodes."""
+    workflow_json_str = (body.get("workflow_json") or "").strip()
+    if not workflow_json_str:
+        raise HTTPException(status_code=400, detail="workflow_json is required")
+
+    # Parse the workflow
+    try:
+        workflow = json.loads(workflow_json_str)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON: {exc}")
+
+    if not isinstance(workflow, dict):
+        raise HTTPException(status_code=422, detail="Workflow must be a JSON object")
+
+    # Extract all class_type values used in the workflow
+    used_types: set = {
+        node.get("class_type", "")
+        for node in workflow.values()
+        if isinstance(node, dict) and node.get("class_type")
+    }
+
+    if not _is_comfyui_running():
+        # Can't check against ComfyUI — report as unverifiable
+        return {"valid": False, "missing_nodes": [], "error": "ComfyUI is not running; cannot validate nodes"}
+
+    # Fetch known node types from ComfyUI
+    try:
+        resp = requests.get(f"{COMFYUI_BASE_URL}/object_info", timeout=15)
+        resp.raise_for_status()
+        known_types: set = set(resp.json().keys())
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"ComfyUI object_info error: {exc}")
+
+    missing = sorted(used_types - known_types)
+    return {"valid": len(missing) == 0, "missing_nodes": missing}

@@ -36,6 +36,8 @@ const thinkingSilentList = document.getElementById("thinkingSilentList");
 const thinkingToolCalls = document.getElementById("thinkingToolCalls");
 const thinkingScreenshot = document.getElementById("thinkingScreenshot");
 const thinkingTokenEstimate = document.getElementById("thinkingTokenEstimate");
+const thinkingVramLabel = document.getElementById("thinkingVramLabel");
+const thinkingVramArc = document.getElementById("thinkingVramArc");
 const thinkingContextToggle = document.getElementById("contextToggle");
 const thinkingContextBody = document.getElementById("thinkingContext");
 const settingsBtn = document.getElementById("settingsBtn");
@@ -63,6 +65,23 @@ const peCancelBtn = document.getElementById("peCancelBtn");
 const kokoroToggleBtn = document.getElementById("kokoroToggleBtn");
 const kokoroStatusDot = document.getElementById("kokoroStatusDot");
 const kokoroStatusText = document.getElementById("kokoroStatusText");
+const comfyuiToggleBtn = document.getElementById("comfyuiToggleBtn");
+const comfyuiStatusDot = document.getElementById("comfyuiStatusDot");
+const comfyuiStatusText = document.getElementById("comfyuiStatusText");
+const comfyuiCheckpointSelect = document.getElementById("comfyuiCheckpointSelect");
+const comfyuiRefreshModelsBtn = document.getElementById("comfyuiRefreshModelsBtn");
+const comfyuiModelSettingsForm = document.getElementById("comfyuiModelSettingsForm");
+const comfyuiStepsInput = document.getElementById("comfyuiStepsInput");
+const comfyuiCfgInput = document.getElementById("comfyuiCfgInput");
+const comfyuiSamplerInput = document.getElementById("comfyuiSamplerInput");
+const comfyuiSchedulerInput = document.getElementById("comfyuiSchedulerInput");
+const comfyuiResolutionList = document.getElementById("comfyuiResolutionList");
+const comfyuiAddResolutionBtn = document.getElementById("comfyuiAddResolutionBtn");
+const comfyuiWorkflowJsonTextarea = document.getElementById("comfyuiWorkflowJsonTextarea");
+const comfyuiValidateWorkflowBtn = document.getElementById("comfyuiValidateWorkflowBtn");
+const comfyuiValidateResult = document.getElementById("comfyuiValidateResult");
+const comfyuiSaveSettingsBtn = document.getElementById("comfyuiSaveSettingsBtn");
+const serviceToasts = document.getElementById("serviceToasts");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
@@ -79,6 +98,32 @@ let idleCaptureEnabled = false;
 let idleCaptureTimerId = null;
 let idleCaptureInProgress = false;
 let lastSpeechTime = Date.now();
+let activeAbortController = null;
+
+function setProcessing(active) {
+  if (!sendBtn) return;
+  if (active) {
+    sendBtn.textContent = "Cancel";
+    sendBtn.classList.add("cancel");
+  } else {
+    sendBtn.textContent = "Send";
+    sendBtn.classList.remove("cancel");
+  }
+}
+
+function cancelActiveRequest() {
+  if (activeAbortController) {
+    activeAbortController.abort();
+    activeAbortController = null;
+  }
+  setProcessing(false);
+  hideTypingIndicator();
+  if (_generatingStatusItem && _generatingStatusItem.parentNode) {
+    _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
+    _generatingStatusItem = null;
+  }
+  interimText.textContent = "";
+}
 let IDLE_CAPTURE_MS = 60000;
 const MAX_SCREEN_WIDTH = 1280;
 const SCREENSHOT_REQUEST_TOKEN = "[REQUEST_SCREENSHOT]";
@@ -102,7 +147,7 @@ let kokoroVoicesLoaded = false;
 let kokoroQueue = [];
 let kokoroPlaying = false;
 let kokoroGeneration = 0;
-let kokoroAbortController = null;
+let kokoroAbortController = null; // unused, kept for compatibility
 let kokoroCurrentAudio = null;
 const SESSION_STORAGE_KEY = "chatSessions";
 const SEARCH_METHOD_KEY = "searchMethod";
@@ -644,7 +689,7 @@ function getChatHistoryKey(id) {
   return `chatHistory:${keyId}`;
 }
 
-function saveChatMessage(role, text) {
+function saveChatMessage(role, text, imageDataUrl) {
   const trimmed = (text || "").trim();
   if (!trimmed || !sessionId) {
     return;
@@ -662,11 +707,21 @@ function saveChatMessage(role, text) {
   if (!Array.isArray(history)) {
     history = [];
   }
-  history.push({ role, text: trimmed });
+  const entry = { role, text: trimmed };
+  if (imageDataUrl) entry.imageDataUrl = imageDataUrl;
+  history.push(entry);
   if (history.length > CHAT_HISTORY_LIMIT) {
     history = history.slice(-CHAT_HISTORY_LIMIT);
   }
-  localStorage.setItem(key, JSON.stringify(history));
+  try {
+    localStorage.setItem(key, JSON.stringify(history));
+  } catch (_) {
+    // Storage quota exceeded — retry without image data so at least the text survives
+    if (imageDataUrl) {
+      const fallback = history.map(e => e === entry ? { role: e.role, text: e.text } : e);
+      try { localStorage.setItem(key, JSON.stringify(fallback)); } catch (_2) {}
+    }
+  }
   touchSession(sessionId);
 }
 
@@ -690,7 +745,7 @@ function loadChatHistory() {
       return;
     }
     const role = item.role === "assistant" ? "assistant" : "user";
-    createChatItem(role, item.text);
+    createChatItem(role, item.text, undefined, item.imageDataUrl || "");
   });
 }
 
@@ -1188,11 +1243,11 @@ function attachImageFile(file) {
   reader.readAsDataURL(file);
 }
 
-function createChatItem(role, text, variant) {
+function createChatItem(role, text, variant, imageDataUrl) {
   const item = document.createElement("div");
   item.className = `chat-item ${role}`;
   if (variant) {
-    item.classList.add(variant);
+    item.classList.add(...variant.split(/\s+/).filter(Boolean));
   }
 
   const meta = document.createElement("div");
@@ -1204,14 +1259,23 @@ function createChatItem(role, text, variant) {
 
   item.appendChild(meta);
   item.appendChild(body);
+
+  if (imageDataUrl) {
+    const img = document.createElement("img");
+    img.src = imageDataUrl;
+    img.alt = "Attached image";
+    img.className = "generated-image";
+    item.appendChild(img);
+  }
+
   chatLog.appendChild(item);
   chatLog.scrollTop = chatLog.scrollHeight;
   return { item, body };
 }
 
-function addChat(role, text) {
-  createChatItem(role, text);
-  saveChatMessage(role, text);
+function addChat(role, text, imageDataUrl) {
+  createChatItem(role, text, undefined, imageDataUrl);
+  saveChatMessage(role, text, imageDataUrl);
   // Ensure scroll happens after DOM update
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -1223,6 +1287,84 @@ function addChat(role, text) {
 function addStatus(text) {
   createChatItem("assistant", text, "status");
   queueSpeech(text);
+}
+
+let _generatingStatusItem = null;
+let _typingIndicatorItem = null;
+
+function showTypingIndicator() {
+  if (_typingIndicatorItem) return;
+  const { item, body } = createChatItem("assistant", "", "status typing");
+  const wrap = document.createElement("div");
+  wrap.className = "typing-indicator";
+  for (let i = 0; i < 3; i++) {
+    const dot = document.createElement("span");
+    dot.className = "typing-dot";
+    wrap.appendChild(dot);
+  }
+  body.appendChild(wrap);
+  _typingIndicatorItem = item;
+}
+
+function hideTypingIndicator() {
+  if (_typingIndicatorItem && _typingIndicatorItem.parentNode) {
+    _typingIndicatorItem.parentNode.removeChild(_typingIndicatorItem);
+  }
+  _typingIndicatorItem = null;
+}
+
+function addGeneratingStatus(text) {
+  if (_generatingStatusItem && _generatingStatusItem.parentNode) {
+    _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
+    _generatingStatusItem = null;
+  }
+  const { item, body } = createChatItem("assistant", "", "status generating");
+  const spinner = document.createElement("span");
+  spinner.className = "gen-spinner";
+  body.appendChild(spinner);
+  const label = document.createElement("span");
+  label.textContent = text;
+  body.appendChild(label);
+  _generatingStatusItem = item;
+  return item;
+}
+
+function addGeneratedImage(url) {
+  const item = document.createElement("div");
+  item.className = "chat-item assistant";
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = "Assistant";
+  const img = document.createElement("img");
+  img.src = url;
+  img.alt = "Generated image";
+  img.className = "generated-image";
+  item.appendChild(meta);
+  item.appendChild(img);
+  // Insert image before the spinner so spinner stays visible while model composes its reply
+  if (_generatingStatusItem && _generatingStatusItem.parentNode) {
+    _generatingStatusItem.parentNode.insertBefore(item, _generatingStatusItem);
+    // Update spinner label
+    const label = _generatingStatusItem.querySelector("span:not(.gen-spinner)");
+    if (label) label.textContent = "Composing reply…";
+  } else {
+    chatLog.appendChild(item);
+  }
+  chatLog.scrollTop = chatLog.scrollHeight;
+
+  // Persist the generated image by converting to a data URL
+  fetch(url)
+    .then(r => r.blob())
+    .then(blob => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    }))
+    .then(dataUrl => {
+      saveChatMessage("assistant", "[Generated image]", dataUrl);
+    })
+    .catch(() => {});
 }
 
 function buildUtterance(text) {
@@ -1288,15 +1430,8 @@ function stopTtsPlayback() {
 function stopKokoroPlayback() {
   kokoroGeneration += 1;
   kokoroPlaying = false;
-  if (kokoroAbortController) {
-    kokoroAbortController.abort();
-    kokoroAbortController = null;
-  }
   clearKokoroQueue();
   if (kokoroCurrentAudio) {
-    if (kokoroCurrentAudio.src.startsWith("blob:")) {
-      URL.revokeObjectURL(kokoroCurrentAudio.src);
-    }
     kokoroCurrentAudio.pause();
     kokoroCurrentAudio.src = "";
     kokoroCurrentAudio = null;
@@ -1305,39 +1440,18 @@ function stopKokoroPlayback() {
 
 function clearKokoroQueue() {
   kokoroQueue.forEach((item) => {
-    if (item.prefetchController) {
-      item.prefetchController.abort();
-    }
-    if (item.audioUrl) {
-      URL.revokeObjectURL(item.audioUrl);
+    if (item.audioElement) {
+      item.audioElement.src = "";
     }
   });
   kokoroQueue = [];
 }
 
-async function fetchKokoroAudio(text, signal) {
+function buildTtsUrl(text) {
   const voice = voiceSelect ? voiceSelect.value : "";
-  const payload = { text: sanitizeTtsText(text) };
-  if (voice) {
-    payload.voice = voice;
-  }
-  const response = await fetch("/api/tts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  if (!response.ok) {
-    const errorText = await response.text();
-    createChatItem(
-      "assistant",
-      `Kokoro TTS error: ${errorText || response.statusText}`,
-      "status"
-    );
-    return "";
-  }
-  const blob = await response.blob();
-  return URL.createObjectURL(blob);
+  const params = new URLSearchParams({ text: sanitizeTtsText(text) });
+  if (voice) params.set("voice", voice);
+  return `/api/tts?${params}`;
 }
 
 function speakWithKokoro(text, interrupt) {
@@ -1351,9 +1465,7 @@ function speakWithKokoro(text, interrupt) {
   kokoroQueue.push({
     text: sanitized,
     generation: kokoroGeneration,
-    audioUrl: "",
-    prefetchPromise: null,
-    prefetchController: null,
+    audioElement: null,
   });
   if (!kokoroPlaying) {
     playNextKokoro();
@@ -1364,26 +1476,15 @@ function speakWithKokoro(text, interrupt) {
 
 function prefetchNextKokoro() {
   const next = kokoroQueue[0];
-  if (!next || next.audioUrl || next.prefetchPromise) {
+  if (!next || next.audioElement) {
     return;
   }
-  const controller = new AbortController();
-  next.prefetchController = controller;
-  next.prefetchPromise = fetchKokoroAudio(next.text, controller.signal)
-    .then((url) => {
-      if (next.generation !== kokoroGeneration) {
-        if (url) {
-          URL.revokeObjectURL(url);
-        }
-        return "";
-      }
-      next.audioUrl = url;
-      return url;
-    })
-    .catch(() => "");
+  const audio = new Audio(buildTtsUrl(next.text));
+  audio.preload = "auto";
+  next.audioElement = audio;
 }
 
-async function playNextKokoro() {
+function playNextKokoro() {
   if (kokoroQueue.length === 0) {
     kokoroPlaying = false;
     return;
@@ -1394,44 +1495,19 @@ async function playNextKokoro() {
     playNextKokoro();
     return;
   }
-  let audioUrl = "";
-  try {
-    if (item.audioUrl) {
-      audioUrl = item.audioUrl;
-    } else if (item.prefetchPromise) {
-      audioUrl = await item.prefetchPromise;
-    } else {
-      const controller = new AbortController();
-      kokoroAbortController = controller;
-      audioUrl = await fetchKokoroAudio(item.text, controller.signal);
-      kokoroAbortController = null;
-    }
-  } catch (error) {
-    audioUrl = "";
-  }
-  if (!audioUrl || item.generation !== kokoroGeneration) {
-    if (audioUrl) {
-      URL.revokeObjectURL(audioUrl);
-    }
-    playNextKokoro();
-    return;
-  }
-  const audio = new Audio(audioUrl);
+  const audio = item.audioElement || new Audio(buildTtsUrl(item.text));
   kokoroCurrentAudio = audio;
   audio.onended = () => {
-    URL.revokeObjectURL(audioUrl);
     if (item.generation === kokoroGeneration) {
       playNextKokoro();
     }
   };
   audio.onerror = () => {
-    URL.revokeObjectURL(audioUrl);
     if (item.generation === kokoroGeneration) {
       playNextKokoro();
     }
   };
   audio.play().catch(() => {
-    URL.revokeObjectURL(audioUrl);
     if (item.generation === kokoroGeneration) {
       playNextKokoro();
     }
@@ -1455,13 +1531,27 @@ function flushSpeechBuffer(force) {
       continue;
     }
 
-    if (force || working.length > 200) {
-      let cut = working.lastIndexOf(" ", 180);
-      if (cut < 40) {
-        cut = Math.min(working.length, 180);
+    if (working.length > 200) {
+      // Only cut at a comma or semicolon to preserve sentence flow
+      const commaMatch = working.match(/^[\s\S]*?[,;—]/);
+      if (commaMatch && commaMatch[0].length <= 200) {
+        chunks.push(commaMatch[0].trim());
+        working = working.slice(commaMatch[0].length).trimStart();
+      } else {
+        // No comma found within 200 chars — hold until a sentence boundary arrives,
+        // unless we're forcing (end of stream), in which case flush the whole thing.
+        if (force) {
+          chunks.push(working.trim());
+          working = "";
+        }
+        break;
       }
-      chunks.push(working.slice(0, cut).trim());
-      working = working.slice(cut).trimStart();
+      continue;
+    }
+
+    if (force) {
+      chunks.push(working.trim());
+      working = "";
       continue;
     }
 
@@ -1568,7 +1658,10 @@ async function sendText(text, options = {}) {
   const userLabel =
     options.userLabel || trimmed || (imageBase64 ? "[Image]" : "");
   if (!hidden) {
-    addChat("user", userLabel);
+    addChat("user", userLabel, usingAttachment ? imageDataUrl : "");
+    setProcessing(true);
+    showTypingIndicator();
+    activeAbortController = new AbortController();
   }
   interimText.textContent = "...";
   if (!hidden) {
@@ -1616,6 +1709,7 @@ async function sendText(text, options = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: activeAbortController ? activeAbortController.signal : undefined,
     });
 
     if (!response.ok || !response.body) {
@@ -1668,20 +1762,22 @@ async function sendText(text, options = {}) {
           if (message.provider) {
             setProviderBadge(message.provider);
           }
-          const toolCalls = Array.isArray(message.tool_calls_made)
-            ? message.tool_calls_made
-            : [];
-          updateThinkingPanel(toolCalls);
-          setThinkingContext(message.context_debug || "");
-          updateThinkingTokenEstimate(message.context_debug || "");
           silentDraftItem = null;
           silentText = "";
           continue;
         }
 
         if (message.type === "status") {
+          hideTypingIndicator();
           if (message.text) {
-            addStatus(message.text);
+            addGeneratingStatus(message.text);
+          }
+          continue;
+        }
+
+        if (message.type === "image_ready") {
+          if (message.url) {
+            addGeneratedImage(message.url);
           }
           continue;
         }
@@ -1693,6 +1789,7 @@ async function sendText(text, options = {}) {
         }
 
         if (message.type === "token") {
+          hideTypingIndicator();
           if (!receivedMeta || !message.text) {
             continue;
           }
@@ -1755,6 +1852,17 @@ async function sendText(text, options = {}) {
         }
 
         if (message.type === "done") {
+          // Remove any lingering generating-status spinner
+          if (_generatingStatusItem && _generatingStatusItem.parentNode) {
+            _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
+          }
+          _generatingStatusItem = null;
+          const toolCalls = Array.isArray(message.tool_calls_made)
+            ? message.tool_calls_made
+            : [];
+          updateThinkingPanel(toolCalls);
+          setThinkingContext(message.context_debug || "");
+          updateThinkingTokenEstimate(message.context_debug || "");
           flushSpeechBuffer(true);
           if (
             silentDraftItem &&
@@ -1798,7 +1906,17 @@ async function sendText(text, options = {}) {
       await sendTextNonStream(payload, shouldClearAttachment, trimmed);
     }
   } catch (error) {
-    await sendTextNonStream(payload, shouldClearAttachment, trimmed);
+    if (error.name === "AbortError") {
+      // User cancelled — already cleaned up in cancelActiveRequest
+      interimText.textContent = "";
+    } else {
+      await sendTextNonStream(payload, shouldClearAttachment, trimmed);
+    }
+  } finally {
+    if (!hidden) {
+      activeAbortController = null;
+      setProcessing(false);
+    }
   }
 }
 
@@ -2123,10 +2241,39 @@ function updateSearchMethodUI() {
 function openSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = false;
   checkKokoroStatus();
+  checkComfyUIStatus();
+  loadComfyUIModels();
 }
 
 function closeSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = true;
+}
+
+// ── Service toast notifications ───────────────────────────────────────────
+
+let kokoroJustStarted = false;
+let comfyuiJustStarted = false;
+
+function updateServiceToasts() {
+  if (!serviceToasts) return;
+  serviceToasts.innerHTML = "";
+  const toasts = [
+    kokoroServiceBusy   ? { label: "Kokoro TTS",  state: kokoroServiceRunning   ? "stopping" : "starting" } : null,
+    comfyuiServiceBusy  ? { label: "ComfyUI",     state: comfyuiServiceRunning  ? "stopping" : "starting" } : null,
+    (!kokoroServiceBusy  && kokoroJustStarted)  ? { label: "Kokoro TTS",  state: "started" } : null,
+    (!comfyuiServiceBusy && comfyuiJustStarted) ? { label: "ComfyUI",     state: "started" } : null,
+  ].filter(Boolean);
+  toasts.forEach(({ label, state }) => {
+    const pill = document.createElement("div");
+    pill.className = "service-toast";
+    const dot = document.createElement("span");
+    dot.className = `service-toast-dot ${state}`;
+    const text = document.createElement("span");
+    text.textContent = state === "started" ? `${label} started` : `${label} ${state}…`;
+    pill.appendChild(dot);
+    pill.appendChild(text);
+    serviceToasts.appendChild(pill);
+  });
 }
 
 // ── Kokoro TTS service management ───────────────────────────────────────────
@@ -2148,12 +2295,12 @@ function updateKokoroUI() {
   } else if (kokoroServiceBusy) {
     kokoroStatusDot.classList.add("stopped");
     kokoroStatusText.textContent = kokoroServiceRunning ? "Stopping…" : "Starting…";
-    kokoroToggleBtn.textContent = kokoroServiceRunning ? "Close" : "Launch";
+    kokoroToggleBtn.textContent = kokoroServiceRunning ? "Stop Service" : "Launch";
     kokoroToggleBtn.disabled = true;
   } else if (kokoroServiceRunning) {
     kokoroStatusDot.classList.add("running");
     kokoroStatusText.textContent = "Running";
-    kokoroToggleBtn.textContent = "Close";
+    kokoroToggleBtn.textContent = "Stop Service";
     kokoroToggleBtn.disabled = false;
   } else {
     kokoroStatusDot.classList.add("stopped");
@@ -2161,6 +2308,7 @@ function updateKokoroUI() {
     kokoroToggleBtn.textContent = "Launch";
     kokoroToggleBtn.disabled = false;
   }
+  updateServiceToasts();
 }
 
 async function checkKokoroStatus() {
@@ -2179,6 +2327,7 @@ async function checkKokoroStatus() {
 
 async function toggleKokoroService() {
   if (kokoroServiceBusy) return;
+  if (kokoroServiceRunning && !confirm("Stop the Kokoro TTS service?")) return;
   kokoroServiceBusy = true;
   updateKokoroUI();
 
@@ -2195,8 +2344,14 @@ async function toggleKokoroService() {
     // ignore – status check below will update UI
   }
 
+  const wasStarting = !kokoroServiceRunning;
   kokoroServiceBusy = false;
   await checkKokoroStatus();
+  if (wasStarting && kokoroServiceRunning) {
+    kokoroJustStarted = true;
+    updateServiceToasts();
+    setTimeout(() => { kokoroJustStarted = false; updateServiceToasts(); }, 3000);
+  }
 }
 
 if (kokoroToggleBtn) {
@@ -2204,6 +2359,263 @@ if (kokoroToggleBtn) {
 }
 
 checkKokoroStatus();
+
+// ── ComfyUI image service management ────────────────────────────────────────
+
+let comfyuiServiceRunning = false;
+let comfyuiServiceAvailable = false;
+let comfyuiServiceBusy = false;
+let comfyuiCurrentCheckpoint = "";
+let comfyuiResolutions = ["1024x1024"];
+
+function updateComfyUIUI() {
+  if (!comfyuiToggleBtn || !comfyuiStatusDot || !comfyuiStatusText) return;
+
+  comfyuiStatusDot.classList.remove("running", "stopped", "unavailable");
+
+  if (!comfyuiServiceAvailable) {
+    comfyuiStatusDot.classList.add("unavailable");
+    comfyuiStatusText.textContent = "Unavailable";
+    comfyuiToggleBtn.textContent = "Launch";
+    comfyuiToggleBtn.disabled = true;
+  } else if (comfyuiServiceBusy) {
+    comfyuiStatusDot.classList.add("stopped");
+    comfyuiStatusText.textContent = comfyuiServiceRunning ? "Stopping…" : "Starting…";
+    comfyuiToggleBtn.textContent = comfyuiServiceRunning ? "Stop Service" : "Launch";
+    comfyuiToggleBtn.disabled = true;
+  } else if (comfyuiServiceRunning) {
+    comfyuiStatusDot.classList.add("running");
+    comfyuiStatusText.textContent = "Running";
+    comfyuiToggleBtn.textContent = "Stop Service";
+    comfyuiToggleBtn.disabled = false;
+  } else {
+    comfyuiStatusDot.classList.add("stopped");
+    comfyuiStatusText.textContent = "Stopped";
+    comfyuiToggleBtn.textContent = "Launch";
+    comfyuiToggleBtn.disabled = false;
+  }
+  updateServiceToasts();
+}
+
+async function checkComfyUIStatus() {
+  try {
+    const res = await fetch("/api/comfyui/status");
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    comfyuiServiceRunning = !!data.running;
+    comfyuiServiceAvailable = !!data.available;
+  } catch {
+    comfyuiServiceRunning = false;
+    comfyuiServiceAvailable = false;
+  }
+  updateComfyUIUI();
+}
+
+async function toggleComfyUIService() {
+  if (comfyuiServiceBusy) return;
+  if (comfyuiServiceRunning && !confirm("Stop the ComfyUI image service?")) return;
+  comfyuiServiceBusy = true;
+  updateComfyUIUI();
+  try {
+    if (comfyuiServiceRunning) {
+      await fetch("/api/comfyui/stop", { method: "POST" });
+    } else {
+      await fetch("/api/comfyui/start", { method: "POST" });
+    }
+  } catch {
+    // ignore
+  }
+  const wasStarting = !comfyuiServiceRunning;
+  comfyuiServiceBusy = false;
+  await checkComfyUIStatus();
+  if (wasStarting && comfyuiServiceRunning) {
+    comfyuiJustStarted = true;
+    updateServiceToasts();
+    setTimeout(() => { comfyuiJustStarted = false; updateServiceToasts(); }, 3000);
+  }
+}
+
+async function loadComfyUIModels() {
+  if (!comfyuiCheckpointSelect) return;
+  try {
+    const [modelsRes, activeRes] = await Promise.all([
+      fetch("/api/comfyui/models"),
+      fetch("/api/comfyui/active-model"),
+    ]);
+    const modelsData = modelsRes.ok ? await modelsRes.json() : { models: [] };
+    const activeData = activeRes.ok ? await activeRes.json() : { checkpoint: "" };
+    const models = modelsData.models || [];
+    comfyuiCurrentCheckpoint = activeData.checkpoint || "";
+
+    comfyuiCheckpointSelect.innerHTML = "";
+    if (models.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No checkpoints found";
+      comfyuiCheckpointSelect.appendChild(opt);
+      if (comfyuiModelSettingsForm) comfyuiModelSettingsForm.style.display = "none";
+      return;
+    }
+    models.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      if (m === comfyuiCurrentCheckpoint) opt.selected = true;
+      comfyuiCheckpointSelect.appendChild(opt);
+    });
+    // If active checkpoint not in list, default to first
+    if (!models.includes(comfyuiCurrentCheckpoint)) {
+      comfyuiCurrentCheckpoint = models[0];
+      comfyuiCheckpointSelect.value = comfyuiCurrentCheckpoint;
+    }
+    await loadComfyUIModelSettings(comfyuiCurrentCheckpoint);
+  } catch {
+    // ignore
+  }
+}
+
+function renderComfyUIResolutions() {
+  if (!comfyuiResolutionList) return;
+  comfyuiResolutionList.innerHTML = "";
+  comfyuiResolutions.forEach((res, i) => {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:4px;margin-bottom:4px;align-items:center";
+    const inp = document.createElement("input");
+    inp.type = "text";
+    inp.value = res;
+    inp.style.cssText = "flex:1;font-size:13px";
+    inp.addEventListener("input", () => { comfyuiResolutions[i] = inp.value.trim(); });
+    const del = document.createElement("button");
+    del.className = "small";
+    del.textContent = "×";
+    del.addEventListener("click", () => {
+      comfyuiResolutions.splice(i, 1);
+      renderComfyUIResolutions();
+    });
+    row.appendChild(inp);
+    row.appendChild(del);
+    comfyuiResolutionList.appendChild(row);
+  });
+}
+
+async function loadComfyUIModelSettings(checkpoint) {
+  if (!checkpoint || !comfyuiModelSettingsForm) return;
+  try {
+    const res = await fetch(`/api/comfyui/model-settings/${encodeURIComponent(checkpoint)}`);
+    if (!res.ok) return;
+    const s = await res.json();
+    if (comfyuiStepsInput) comfyuiStepsInput.value = s.steps ?? 20;
+    if (comfyuiCfgInput) comfyuiCfgInput.value = s.cfg ?? 7;
+    if (comfyuiSamplerInput) comfyuiSamplerInput.value = s.sampler ?? "euler";
+    if (comfyuiSchedulerInput) comfyuiSchedulerInput.value = s.scheduler ?? "normal";
+    comfyuiResolutions = Array.isArray(s.resolutions) && s.resolutions.length ? [...s.resolutions] : ["1024x1024"];
+    renderComfyUIResolutions();
+    if (comfyuiWorkflowJsonTextarea) comfyuiWorkflowJsonTextarea.value = s.workflow_json || "";
+    if (comfyuiValidateResult) comfyuiValidateResult.textContent = "";
+    comfyuiModelSettingsForm.style.display = "block";
+  } catch {
+    // ignore
+  }
+}
+
+if (comfyuiToggleBtn) {
+  comfyuiToggleBtn.addEventListener("click", toggleComfyUIService);
+}
+
+if (comfyuiCheckpointSelect) {
+  comfyuiCheckpointSelect.addEventListener("change", () => {
+    comfyuiCurrentCheckpoint = comfyuiCheckpointSelect.value;
+    loadComfyUIModelSettings(comfyuiCurrentCheckpoint);
+  });
+}
+
+if (comfyuiRefreshModelsBtn) {
+  comfyuiRefreshModelsBtn.addEventListener("click", loadComfyUIModels);
+}
+
+if (comfyuiAddResolutionBtn) {
+  comfyuiAddResolutionBtn.addEventListener("click", () => {
+    comfyuiResolutions.push("512x512");
+    renderComfyUIResolutions();
+  });
+}
+
+if (comfyuiValidateWorkflowBtn) {
+  comfyuiValidateWorkflowBtn.addEventListener("click", async () => {
+    if (!comfyuiWorkflowJsonTextarea || !comfyuiValidateResult) return;
+    const wj = comfyuiWorkflowJsonTextarea.value.trim();
+    if (!wj) {
+      comfyuiValidateResult.textContent = "No workflow JSON entered.";
+      comfyuiValidateResult.style.color = "var(--muted)";
+      return;
+    }
+    comfyuiValidateResult.textContent = "Validating…";
+    comfyuiValidateResult.style.color = "var(--muted)";
+    try {
+      const res = await fetch("/api/comfyui/validate-workflow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workflow_json: wj }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        comfyuiValidateResult.textContent = data.error;
+        comfyuiValidateResult.style.color = "#f0a020";
+      } else if (data.valid) {
+        comfyuiValidateResult.textContent = "✅ All nodes available";
+        comfyuiValidateResult.style.color = "#4caf50";
+      } else {
+        comfyuiValidateResult.textContent = `❌ Missing nodes: ${data.missing_nodes.join(", ")}`;
+        comfyuiValidateResult.style.color = "#c44";
+      }
+    } catch {
+      comfyuiValidateResult.textContent = "Validation request failed.";
+      comfyuiValidateResult.style.color = "#c44";
+    }
+  });
+}
+
+if (comfyuiSaveSettingsBtn) {
+  comfyuiSaveSettingsBtn.addEventListener("click", async () => {
+    const checkpoint = comfyuiCheckpointSelect ? comfyuiCheckpointSelect.value : "";
+    if (!checkpoint) return;
+    const wj = comfyuiWorkflowJsonTextarea ? comfyuiWorkflowJsonTextarea.value.trim() : null;
+    const payload = {
+      steps: parseInt(comfyuiStepsInput ? comfyuiStepsInput.value : 20, 10),
+      cfg: parseFloat(comfyuiCfgInput ? comfyuiCfgInput.value : 7),
+      sampler: comfyuiSamplerInput ? comfyuiSamplerInput.value.trim() : "euler",
+      scheduler: comfyuiSchedulerInput ? comfyuiSchedulerInput.value.trim() : "normal",
+      resolutions: comfyuiResolutions.filter(Boolean),
+      workflow_json: wj || null,
+    };
+    try {
+      // Save active checkpoint
+      await fetch("/api/comfyui/active-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ checkpoint }),
+      });
+      // Save model-specific settings
+      await fetch(`/api/comfyui/model-settings/${encodeURIComponent(checkpoint)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      comfyuiCurrentCheckpoint = checkpoint;
+      if (comfyuiSaveSettingsBtn) {
+        const orig = comfyuiSaveSettingsBtn.textContent;
+        comfyuiSaveSettingsBtn.textContent = "Saved!";
+        setTimeout(() => { comfyuiSaveSettingsBtn.textContent = orig; }, 1500);
+      }
+    } catch {
+      // ignore
+    }
+  });
+}
+
+checkComfyUIStatus();
+loadComfyUIModels();
+
 
 updateSearchMethodUI();
 
@@ -2638,7 +3050,91 @@ document.addEventListener("paste", (event) => {
   attachImageFile(file);
 });
 
+// ---------------------------------------------------------------------------
+// Slash commands
+// ---------------------------------------------------------------------------
+
+const SLASH_COMMANDS = [
+  {
+    name: "/cleanvram",
+    desc: "Unload all Ollama models and free ComfyUI VRAM",
+    async execute() {
+      addChat("user", "/cleanvram");
+      try {
+        const r = await fetch("/api/cleanvram", { method: "POST" });
+        if (r.ok) {
+          addChat("assistant", "VRAM cleared — all models unloaded.");
+        } else {
+          addChat("assistant", `Error: ${r.status} ${r.statusText}`);
+        }
+      } catch (e) {
+        addChat("assistant", `Error: ${e.message}`);
+      }
+    },
+  },
+];
+
+const slashMenu = document.getElementById("slashMenu");
+const slashList = document.getElementById("slashList");
+let slashActive = -1;
+let slashFiltered = [];
+
+function slashMenuVisible() {
+  return !slashMenu.hidden;
+}
+
+function renderSlashMenu(filtered) {
+  slashFiltered = filtered;
+  slashList.innerHTML = "";
+  filtered.forEach((cmd, i) => {
+    const li = document.createElement("li");
+    li.className = "slash-item" + (i === slashActive ? " active" : "");
+    li.innerHTML = `<span class="slash-item-name">${cmd.name}</span><span class="slash-item-desc">${cmd.desc}</span>`;
+    li.addEventListener("mousedown", e => {
+      e.preventDefault();
+      applySlashCommand(cmd);
+    });
+    slashList.appendChild(li);
+  });
+  slashMenu.hidden = filtered.length === 0;
+}
+
+function updateSlashActive(idx) {
+  slashActive = idx;
+  Array.from(slashList.children).forEach((el, i) => {
+    el.classList.toggle("active", i === idx);
+  });
+}
+
+function applySlashCommand(cmd) {
+  textInput.value = "";
+  slashMenu.hidden = true;
+  slashActive = -1;
+  cmd.execute();
+}
+
+textInput.addEventListener("input", () => {
+  const val = textInput.value;
+  if (!val.startsWith("/")) {
+    slashMenu.hidden = true;
+    slashActive = -1;
+    return;
+  }
+  const query = val.toLowerCase();
+  const filtered = SLASH_COMMANDS.filter(c => c.name.startsWith(query));
+  slashActive = filtered.length > 0 ? 0 : -1;
+  renderSlashMenu(filtered);
+});
+
+textInput.addEventListener("blur", () => {
+  setTimeout(() => { slashMenu.hidden = true; slashActive = -1; }, 120);
+});
+
 sendBtn.addEventListener("click", () => {
+  if (sendBtn.classList.contains("cancel")) {
+    cancelActiveRequest();
+    return;
+  }
   const value = textInput.value;
   textInput.value = "";
   sendText(value);
@@ -2647,6 +3143,29 @@ sendBtn.addEventListener("click", () => {
 });
 
 textInput.addEventListener("keydown", (event) => {
+  if (slashMenuVisible()) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      updateSlashActive((slashActive + 1) % slashFiltered.length);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      updateSlashActive((slashActive - 1 + slashFiltered.length) % slashFiltered.length);
+      return;
+    }
+    if (event.key === "Tab" || (event.key === "Enter" && slashActive >= 0)) {
+      event.preventDefault();
+      const cmd = slashFiltered[slashActive] || slashFiltered[0];
+      if (cmd) applySlashCommand(cmd);
+      return;
+    }
+    if (event.key === "Escape") {
+      slashMenu.hidden = true;
+      slashActive = -1;
+      return;
+    }
+  }
   if (event.key === "Enter") {
     const value = textInput.value;
     textInput.value = "";
@@ -2736,3 +3255,220 @@ if (screenshotIntervalInput) {
     }
   });
 }
+
+// ── VRAM indicator ──────────────────────────────────────────────────────────
+
+async function updateVramIndicator() {
+  try {
+    const res = await fetch("/api/vram");
+    if (!res.ok) return;
+    const { used_gb, total_gb } = await res.json();
+    if (used_gb === null || total_gb === null || total_gb === 0) {
+      if (thinkingVramLabel) thinkingVramLabel.textContent = "VRAM —";
+      return;
+    }
+    const pct = used_gb / total_gb;
+    const circumference = 2 * Math.PI * 8; // r=8
+    const filled = pct * circumference;
+    if (thinkingVramArc) {
+      thinkingVramArc.setAttribute("stroke-dasharray", `${filled.toFixed(2)} ${circumference.toFixed(2)}`);
+    }
+    if (thinkingVramLabel) {
+      thinkingVramLabel.textContent = `VRAM ${used_gb}/${total_gb} GB`;
+    }
+  } catch (_) {}
+}
+
+updateVramIndicator();
+
+// ---------------------------------------------------------------------------
+// Image lightbox
+// ---------------------------------------------------------------------------
+(function () {
+  const backdrop = document.getElementById('lightboxBackdrop');
+  const stage    = document.getElementById('lightboxStage');
+  const img      = document.getElementById('lightboxImg');
+  const zoomInBtn  = document.getElementById('lightboxZoomIn');
+  const zoomOutBtn = document.getElementById('lightboxZoomOut');
+  const zoomLabel  = document.getElementById('lightboxZoomLabel');
+  const closeBtn   = document.getElementById('lightboxClose');
+
+  const ZOOM_STEP = 0.25;
+  const ZOOM_MIN  = 0.25;
+  const ZOOM_MAX  = 4;
+
+  // State: translate + scale with transform-origin 0 0
+  let scale = 1, tx = 0, ty = 0;
+
+  function commit() {
+    img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+    zoomLabel.textContent = Math.round(scale * 100) + '%';
+  }
+
+  // Zoom around a stage-relative point (stageX, stageY)
+  function zoomAt(newScale, stageX, stageY) {
+    newScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newScale));
+    // Image-space point that is currently under (stageX, stageY)
+    const ix = (stageX - tx) / scale;
+    const iy = (stageY - ty) / scale;
+    // After zoom, keep that image-space point under the same stage point
+    tx = stageX - ix * newScale;
+    ty = stageY - iy * newScale;
+    scale = newScale;
+    commit();
+  }
+
+  // Zoom around viewport center (for toolbar buttons / keyboard)
+  function zoomCenter(newScale) {
+    zoomAt(newScale, stage.clientWidth / 2, stage.clientHeight / 2);
+  }
+
+  function initTransform() {
+    const sw = stage.clientWidth;
+    const sh = stage.clientHeight;
+    const iw = img.naturalWidth  || img.width;
+    const ih = img.naturalHeight || img.height;
+    // Fit to 90% of the stage, never upscale beyond 1×
+    scale = Math.min(1, sw * 0.9 / iw, sh * 0.9 / ih);
+    img.style.width  = iw + 'px';
+    img.style.height = ih + 'px';
+    // Center
+    tx = (sw - iw * scale) / 2;
+    ty = (sh - ih * scale) / 2;
+    commit();
+  }
+
+  function open(src) {
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+    if (img.src === src && img.complete) {
+      initTransform();
+    } else {
+      img.src = src;
+    }
+  }
+
+  function close() {
+    backdrop.hidden = true;
+    img.src = '';
+    document.body.style.overflow = '';
+    stage.classList.remove('panning');
+  }
+
+  img.addEventListener('load', initTransform);
+
+  // Open on any chat image click
+  document.addEventListener('click', e => {
+    const target = e.target.closest('.chat-item img.generated-image');
+    if (target) open(target.src);
+  });
+
+  closeBtn.addEventListener('click', e => { e.stopPropagation(); close(); });
+
+  zoomInBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    zoomCenter(scale + ZOOM_STEP);
+  });
+  zoomOutBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    zoomCenter(scale - ZOOM_STEP);
+  });
+
+  // Wheel zoom at cursor
+  stage.addEventListener('wheel', e => {
+    e.preventDefault();
+    const r = stage.getBoundingClientRect();
+    zoomAt(scale + (e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP), e.clientX - r.left, e.clientY - r.top);
+  }, { passive: false });
+
+  // Drag-to-pan + click-to-zoom (with didDrag guard)
+  let dragging = false, didDrag = false;
+  let dragStartX = 0, dragStartY = 0, txStart = 0, tyStart = 0;
+
+  stage.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    dragging = true;
+    didDrag  = false;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    txStart = tx;
+    tyStart = ty;
+    stage.classList.add('panning');
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - dragStartX;
+    const dy = e.clientY - dragStartY;
+    if (!didDrag && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) didDrag = true;
+    tx = txStart + dx;
+    ty = tyStart + dy;
+    commit();
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    stage.classList.remove('panning');
+  });
+
+  // Click image → zoom in at click point; click bare stage → close
+  stage.addEventListener('click', e => {
+    if (didDrag) { didDrag = false; return; }
+    if (e.target === img) {
+      const r = stage.getBoundingClientRect();
+      zoomAt(scale + ZOOM_STEP, e.clientX - r.left, e.clientY - r.top);
+    } else if (e.target === stage) {
+      close();
+    }
+  });
+
+  // Keyboard
+  document.addEventListener('keydown', e => {
+    if (backdrop.hidden) return;
+    if (e.key === 'Escape') close();
+    if (e.key === '+' || e.key === '=') zoomCenter(scale + ZOOM_STEP);
+    if (e.key === '-') zoomCenter(scale - ZOOM_STEP);
+  });
+}());
+
+// Chat resize
+(function () {
+  const handle = document.getElementById('chatResizeHandle');
+  const STORAGE_KEY = 'chatLogHeight';
+  const MIN_H = 120;
+
+  const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+  if (saved >= MIN_H) chatLog.style.maxHeight = saved + 'px';
+
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+
+  handle.addEventListener('mousedown', e => {
+    dragging = true;
+    startY = e.clientY;
+    startH = chatLog.getBoundingClientRect().height;
+    handle.classList.add('dragging');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const newH = Math.max(MIN_H, startH + (e.clientY - startY));
+    chatLog.style.maxHeight = newH + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    localStorage.setItem(STORAGE_KEY, parseInt(chatLog.style.maxHeight, 10));
+  });
+}());
+setInterval(updateVramIndicator, 5000);
