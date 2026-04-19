@@ -695,6 +695,64 @@ function getChatHistoryKey(id) {
   return `chatHistory:${keyId}`;
 }
 
+function saveOrUpdateImageGroup(saveId, dataUrl) {
+  if (!sessionId || !saveId) return;
+  _currentImageGroupDataUrls.push(dataUrl);
+  const key = getChatHistoryKey(sessionId);
+  if (!key) return;
+  let history = [];
+  try { history = JSON.parse(localStorage.getItem(key) || "[]"); } catch(_) { history = []; }
+  if (!Array.isArray(history)) history = [];
+  const entry = { role: "assistant", text: "[Generated images]", groupId: saveId, imageDataUrls: [..._currentImageGroupDataUrls] };
+  const idx = history.findIndex(e => e.groupId === saveId);
+  if (idx >= 0) {
+    history[idx] = entry;
+  } else {
+    history.push(entry);
+    if (history.length > CHAT_HISTORY_LIMIT) history = history.slice(-CHAT_HISTORY_LIMIT);
+  }
+  try {
+    localStorage.setItem(key, JSON.stringify(history));
+  } catch(_) {
+    const fallback = history.map(e => e.groupId === saveId ? { role: e.role, text: e.text, groupId: e.groupId } : e);
+    try { localStorage.setItem(key, JSON.stringify(fallback)); } catch(_2) {}
+  }
+  touchSession(sessionId);
+}
+
+function createImageGroupItem(role, dataUrls) {
+  const item = document.createElement("div");
+  item.className = `chat-item ${role}`;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = role === "user" ? "You" : "Assistant";
+  const grid = document.createElement("div");
+  grid.className = "image-grid";
+  grid.dataset.count = String(Math.min(dataUrls.length, 4));
+  item.appendChild(meta);
+  item.appendChild(grid);
+  dataUrls.forEach((src, i) => {
+    const cell = document.createElement("div");
+    cell.className = "image-grid-cell";
+    if (i >= 3) cell.style.display = "none";
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = role === "user" ? "Attached image" : "Generated image";
+    img.className = "generated-image";
+    cell.appendChild(img);
+    if (i === 2 && dataUrls.length > 3) {
+      const badge = document.createElement("div");
+      badge.className = "image-grid-overflow";
+      badge.dataset.overflowBadge = "1";
+      badge.textContent = `+${dataUrls.length - 3}`;
+      cell.appendChild(badge);
+    }
+    grid.appendChild(cell);
+  });
+  chatLog.appendChild(item);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
 function saveChatMessage(role, text, imageDataUrl) {
   const trimmed = (text || "").trim();
   if (!trimmed || !sessionId) {
@@ -751,7 +809,11 @@ function loadChatHistory() {
       return;
     }
     const role = item.role === "assistant" ? "assistant" : "user";
-    createChatItem(role, item.text, undefined, item.imageDataUrl || "");
+    if (item.imageDataUrls && Array.isArray(item.imageDataUrls) && item.imageDataUrls.length > 0) {
+      createImageGroupItem(role, item.imageDataUrls);
+    } else {
+      createChatItem(role, item.text, undefined, item.imageDataUrl || "");
+    }
   });
 }
 
@@ -1267,11 +1329,18 @@ function createChatItem(role, text, variant, imageDataUrl) {
   item.appendChild(body);
 
   if (imageDataUrl) {
-    const img = document.createElement("img");
-    img.src = imageDataUrl;
-    img.alt = "Attached image";
-    img.className = "generated-image";
-    item.appendChild(img);
+    const grid = document.createElement("div");
+    grid.className = "image-grid";
+    grid.dataset.count = "1";
+    const cell = document.createElement("div");
+    cell.className = "image-grid-cell";
+    const attachedImg = document.createElement("img");
+    attachedImg.src = imageDataUrl;
+    attachedImg.alt = "Attached image";
+    attachedImg.className = "generated-image";
+    cell.appendChild(attachedImg);
+    grid.appendChild(cell);
+    item.appendChild(grid);
   }
 
   chatLog.appendChild(item);
@@ -1297,6 +1366,12 @@ function addStatus(text) {
 
 let _generatingStatusItem = null;
 let _typingIndicatorItem = null;
+let _currentImageGroupItem = null;
+let _currentImageGroupGrid = null;
+let _currentImageGroupCount = 0;
+let _imageGenTotal = 0;
+let _currentImageGroupSaveId = null;
+let _currentImageGroupDataUrls = [];
 
 function showTypingIndicator() {
   if (_typingIndicatorItem) return;
@@ -1335,42 +1410,73 @@ function addGeneratingStatus(text) {
   return item;
 }
 
-function addGeneratedImage(url) {
-  const item = document.createElement("div");
-  item.className = "chat-item assistant";
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  meta.textContent = "Assistant";
+function addToImageGroup(url) {
+  if (!_currentImageGroupGrid) {
+    const item = document.createElement("div");
+    item.className = "chat-item assistant";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "Assistant";
+    const grid = document.createElement("div");
+    grid.className = "image-grid";
+    grid.dataset.count = "1";
+    item.appendChild(meta);
+    item.appendChild(grid);
+    _currentImageGroupItem = item;
+    _currentImageGroupGrid = grid;
+    if (_generatingStatusItem && _generatingStatusItem.parentNode) {
+      _generatingStatusItem.parentNode.insertBefore(item, _generatingStatusItem);
+    } else {
+      chatLog.appendChild(item);
+    }
+  }
+
+  _currentImageGroupCount++;
+  const count = _currentImageGroupCount;
+  _currentImageGroupGrid.dataset.count = String(Math.min(count, 4));
+
+  const cell = document.createElement("div");
+  cell.className = "image-grid-cell";
   const img = document.createElement("img");
   img.src = url;
   img.alt = "Generated image";
   img.className = "generated-image";
-  item.appendChild(meta);
-  item.appendChild(img);
-  // Insert image before the spinner so spinner stays visible while model composes its reply
-  if (_generatingStatusItem && _generatingStatusItem.parentNode) {
-    _generatingStatusItem.parentNode.insertBefore(item, _generatingStatusItem);
-    // Update spinner label
-    const label = _generatingStatusItem.querySelector("span:not(.gen-spinner)");
-    if (label) label.textContent = "Composing reply…";
-  } else {
-    chatLog.appendChild(item);
+  cell.appendChild(img);
+  // Cells 4+ are hidden (kept in DOM for lightbox navigation)
+  if (count > 3) cell.style.display = "none";
+  _currentImageGroupGrid.appendChild(cell);
+
+  // Add overflow badge when 4th image arrives; update count for 5+
+  if (count === 4) {
+    const thirdCell = _currentImageGroupGrid.children[2];
+    if (thirdCell) {
+      const badge = document.createElement("div");
+      badge.className = "image-grid-overflow";
+      badge.dataset.overflowBadge = "1";
+      badge.textContent = "+1";
+      thirdCell.appendChild(badge);
+    }
+  } else if (count > 4) {
+    const thirdCell = _currentImageGroupGrid.children[2];
+    if (thirdCell) {
+      const badge = thirdCell.querySelector("[data-overflow-badge]");
+      if (badge) badge.textContent = `+${count - 3}`;
+    }
   }
+
+  // Update spinner label when all expected images have arrived
+  if (_generatingStatusItem) {
+    const label = _generatingStatusItem.querySelector("span:not(.gen-spinner)");
+    if (label && (_imageGenTotal === 0 || count >= _imageGenTotal)) {
+      label.textContent = "Composing reply…";
+    }
+  }
+
   chatLog.scrollTop = chatLog.scrollHeight;
 
-  // Persist the generated image by converting to a data URL
-  fetch(url)
-    .then(r => r.blob())
-    .then(blob => new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    }))
-    .then(dataUrl => {
-      saveChatMessage("assistant", "[Generated image]", dataUrl);
-    })
-    .catch(() => {});
+  // Persist URL path (not base64) to avoid localStorage quota issues
+  if (!_currentImageGroupSaveId) _currentImageGroupSaveId = `img-${Date.now()}`;
+  saveOrUpdateImageGroup(_currentImageGroupSaveId, url);
 }
 
 function buildUtterance(text) {
@@ -1640,6 +1746,7 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
 async function sendText(text, options = {}) {
   const trimmed = (text || "").trim();
   const hidden = Boolean(options.hidden);
+  const regenerate = Boolean(options.regenerate);
   const screenshotFollowup = Boolean(options.screenshotFollowup);
   const contextImageType = (options.contextImageType || "").toLowerCase();
   const contextImageLabel = options.contextImageLabel || "";
@@ -1663,8 +1770,12 @@ async function sendText(text, options = {}) {
 
   const userLabel =
     options.userLabel || trimmed || (imageBase64 ? "[Image]" : "");
-  if (!hidden) {
+  if (!hidden && !regenerate) {
     addChat("user", userLabel, usingAttachment ? imageDataUrl : "");
+    setProcessing(true);
+    showTypingIndicator();
+    activeAbortController = new AbortController();
+  } else if (regenerate) {
     setProcessing(true);
     showTypingIndicator();
     activeAbortController = new AbortController();
@@ -1697,6 +1808,9 @@ async function sendText(text, options = {}) {
   if (hidden) {
     payload.hidden = true;
   }
+  if (regenerate) {
+    payload.regenerate = true;
+  }
   if (screenshotFollowup) {
     payload.screenshot_followup = true;
   }
@@ -1709,6 +1823,14 @@ async function sendText(text, options = {}) {
   }
   const hadImage = Boolean(imageBase64);
   const shouldClearAttachment = Boolean(usingAttachment);
+
+  // Reset multi-image group tracking for this turn
+  _currentImageGroupItem = null;
+  _currentImageGroupGrid = null;
+  _currentImageGroupCount = 0;
+  _imageGenTotal = 0;
+  _currentImageGroupSaveId = null;
+  _currentImageGroupDataUrls = [];
 
   let assistantItem = null;
   let silentDraftItem = null;
@@ -1776,6 +1898,11 @@ async function sendText(text, options = {}) {
           continue;
         }
 
+        if (message.type === "image_generation_start") {
+          _imageGenTotal = message.total || 0;
+          continue;
+        }
+
         if (message.type === "status") {
           hideTypingIndicator();
           if (message.text) {
@@ -1786,7 +1913,7 @@ async function sendText(text, options = {}) {
 
         if (message.type === "image_ready") {
           if (message.url) {
-            addGeneratedImage(message.url);
+            addToImageGroup(message.url);
           }
           continue;
         }
@@ -3406,13 +3533,92 @@ updateVramIndicator();
 
   img.addEventListener('load', initTransform);
 
-  // Open on any chat image click
+  // Multi-image navigation state
+  let _lbImages = [];
+  let _lbIdx = 0;
+  const prevBtn = document.getElementById('lightboxPrev');
+  const nextBtn = document.getElementById('lightboxNext');
+  const lbCounter = document.getElementById('lightboxCounter');
+
+  function updateNav() {
+    const multi = _lbImages.length > 1;
+    if (prevBtn) prevBtn.style.display = multi ? 'flex' : 'none';
+    if (nextBtn) nextBtn.style.display = multi ? 'flex' : 'none';
+    if (lbCounter) {
+      lbCounter.style.display = multi ? 'block' : 'none';
+      if (multi) lbCounter.textContent = `${_lbIdx + 1} / ${_lbImages.length}`;
+    }
+  }
+
+  function loadIdx(idx) {
+    const len = _lbImages.length;
+    _lbIdx = len > 0 ? ((idx % len) + len) % len : 0;
+    const src = _lbImages[_lbIdx];
+    if (img.src === src && img.complete) {
+      initTransform();
+    } else {
+      img.src = src;
+    }
+    updateNav();
+  }
+
+  function openFromElement(imgEl) {
+    const grid = imgEl.closest('.image-grid');
+    if (grid) {
+      _lbImages = Array.from(grid.querySelectorAll('img.generated-image')).map(el => el.src);
+    } else {
+      _lbImages = [imgEl.src];
+    }
+    _lbIdx = Math.max(0, _lbImages.indexOf(imgEl.src));
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+    loadIdx(_lbIdx);
+  }
+
+  function openAtOverflow(grid) {
+    _lbImages = Array.from(grid.querySelectorAll('img.generated-image')).map(el => el.src);
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+    loadIdx(2);
+  }
+
+  function navLightbox(delta) {
+    loadIdx(_lbIdx + delta);
+  }
+
+  function open(src) {
+    _lbImages = [src];
+    _lbIdx = 0;
+    backdrop.hidden = false;
+    document.body.style.overflow = 'hidden';
+    loadIdx(0);
+  }
+
+  function close() {
+    backdrop.hidden = true;
+    img.src = '';
+    _lbImages = [];
+    _lbIdx = 0;
+    document.body.style.overflow = '';
+    stage.classList.remove('panning');
+    updateNav();
+  }
+
+  // Open on any chat image click (overflow badge opens at image 3)
   document.addEventListener('click', e => {
+    const overflow = e.target.closest('.image-grid-overflow');
+    if (overflow) {
+      const grid = overflow.closest('.image-grid');
+      if (grid) openAtOverflow(grid);
+      return;
+    }
     const target = e.target.closest('.chat-item img.generated-image');
-    if (target) open(target.src);
+    if (target) openFromElement(target);
   });
 
   closeBtn.addEventListener('click', e => { e.stopPropagation(); close(); });
+  if (prevBtn) prevBtn.addEventListener('click', e => { e.stopPropagation(); navLightbox(-1); });
+  if (nextBtn) nextBtn.addEventListener('click', e => { e.stopPropagation(); navLightbox(1); });
 
   zoomInBtn.addEventListener('click', e => {
     e.stopPropagation();
@@ -3479,6 +3685,8 @@ updateVramIndicator();
     if (e.key === 'Escape') close();
     if (e.key === '+' || e.key === '=') zoomCenter(scale + ZOOM_STEP);
     if (e.key === '-') zoomCenter(scale - ZOOM_STEP);
+    if (e.key === 'ArrowLeft') { e.preventDefault(); navLightbox(-1); }
+    if (e.key === 'ArrowRight') { e.preventDefault(); navLightbox(1); }
   });
 }());
 
@@ -3521,3 +3729,279 @@ updateVramIndicator();
   });
 }());
 setInterval(updateVramIndicator, 5000);
+
+// ---------------------------------------------------------------------------
+// Context menu (right-click actions on most-recent chat messages)
+// ---------------------------------------------------------------------------
+(function () {
+  const ctxMenu = document.getElementById('ctxMenu');
+  if (!ctxMenu) return;
+
+  let ctxTarget = null;   // the DOM element being acted on
+  let ctxRole   = null;   // 'user' | 'assistant'
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+
+  function getLastRealItem(role) {
+    // Last non-status chat-item with the given role
+    const items = Array.from(chatLog.querySelectorAll(`.chat-item.${role}`))
+      .filter(el => !el.classList.contains('status') && !el.classList.contains('typing'));
+    return items.length ? items[items.length - 1] : null;
+  }
+
+  function isLastRealItem(el, role) {
+    return el && el === getLastRealItem(role);
+  }
+
+  /** Remove the last entry with the given role from localStorage chat history */
+  function removeLastFromHistory(role) {
+    const key = getChatHistoryKey(sessionId);
+    if (!key) return;
+    let history = [];
+    try { history = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_) { history = []; }
+    if (!Array.isArray(history)) history = [];
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].role === role) {
+        history.splice(i, 1);
+        break;
+      }
+    }
+    localStorage.setItem(key, JSON.stringify(history));
+  }
+
+  /** Remove the last assistant + last user entries from localStorage */
+  function removeLastExchangeFromHistory() {
+    removeLastFromHistory('assistant');
+    removeLastFromHistory('user');
+  }
+
+  // ── context menu display ───────────────────────────────────────────────────
+
+  function hideMenu() {
+    ctxMenu.hidden = true;
+    if (ctxTarget) {
+      ctxTarget.classList.remove('ctx-target');
+      ctxTarget = null;
+    }
+    ctxRole = null;
+  }
+
+  function buildMenuItem(label, cls, onClick) {
+    const item = document.createElement('div');
+    item.className = 'ctx-menu-item' + (cls ? ' ' + cls : '');
+    item.setAttribute('role', 'menuitem');
+    item.textContent = label;
+    item.addEventListener('mousedown', e => { e.preventDefault(); });
+    item.addEventListener('click', () => { hideMenu(); onClick(); });
+    return item;
+  }
+
+  function buildSep() {
+    const sep = document.createElement('div');
+    sep.className = 'ctx-menu-sep';
+    return sep;
+  }
+
+  function showMenu(x, y, items) {
+    ctxMenu.innerHTML = '';
+    items.forEach(item => {
+      if (item === 'sep') {
+        ctxMenu.appendChild(buildSep());
+      } else {
+        ctxMenu.appendChild(buildMenuItem(item.label, item.cls || '', item.action));
+      }
+    });
+    ctxMenu.hidden = false;
+
+    // Position within viewport
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const mw = ctxMenu.offsetWidth || 190;
+    const mh = ctxMenu.offsetHeight || 100;
+    ctxMenu.style.left = Math.min(x, vw - mw - 8) + 'px';
+    ctxMenu.style.top  = Math.min(y, vh - mh - 8) + 'px';
+  }
+
+  // ── actions ────────────────────────────────────────────────────────────────
+
+  async function actionRegenerateAssistant() {
+    const prompt = lastUserPrompt;
+    if (!prompt) return;
+
+    // 1. Delete last assistant message from backend DB
+    const activeP = getActivePersonality();
+    try {
+      await fetch(
+        `/api/session/${encodeURIComponent(sessionId)}/last_assistant?personality_id=${encodeURIComponent(activeP.id)}`,
+        { method: 'DELETE' }
+      );
+    } catch (_) {}
+
+    // 2. Remove last assistant DOM item
+    const lastA = getLastRealItem('assistant');
+    if (lastA) lastA.remove();
+
+    // 3. Remove last assistant entry from localStorage
+    removeLastFromHistory('assistant');
+
+    // 4. Re-send the same prompt without re-adding user to DB
+    await sendText(prompt, { regenerate: true });
+  }
+
+  async function actionDeleteAssistant() {
+    const activeP = getActivePersonality();
+
+    // 1. Delete last assistant from backend DB
+    try {
+      await fetch(
+        `/api/session/${encodeURIComponent(sessionId)}/last_assistant?personality_id=${encodeURIComponent(activeP.id)}`,
+        { method: 'DELETE' }
+      );
+    } catch (_) {}
+
+    // 2. Remove last assistant DOM item
+    const lastA = getLastRealItem('assistant');
+    if (lastA) lastA.remove();
+
+    // 3. Remove from localStorage
+    removeLastFromHistory('assistant');
+  }
+
+  async function actionDeleteExchange() {
+    const activeP = getActivePersonality();
+
+    // 1. Delete last user + assistant from backend DB
+    try {
+      await fetch(
+        `/api/session/${encodeURIComponent(sessionId)}/last_exchange?personality_id=${encodeURIComponent(activeP.id)}`,
+        { method: 'DELETE' }
+      );
+    } catch (_) {}
+
+    // 2. Remove last assistant DOM item (may not exist if user hasn't responded)
+    const lastA = getLastRealItem('assistant');
+    if (lastA) lastA.remove();
+
+    // 3. Remove last user DOM item
+    const lastU = getLastRealItem('user');
+    if (lastU) lastU.remove();
+
+    // 4. Remove from localStorage
+    removeLastExchangeFromHistory();
+  }
+
+  function actionEditUser(el) {
+    // Get current text from the body div (second child after .meta)
+    const bodyEl = el.querySelector(':scope > div:not(.meta):not(.image-grid)');
+    const originalText = bodyEl ? bodyEl.textContent : '';
+
+    // Build inline edit UI
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-edit-wrap';
+
+    const textarea = document.createElement('textarea');
+    textarea.className = 'chat-edit-input';
+    textarea.value = originalText;
+    textarea.rows = Math.max(2, originalText.split('\n').length);
+
+    const actions = document.createElement('div');
+    actions.className = 'chat-edit-actions';
+
+    const sendEditBtn = document.createElement('button');
+    sendEditBtn.type = 'button';
+    sendEditBtn.className = 'primary small';
+    sendEditBtn.textContent = 'Resend';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'ghost small';
+    cancelBtn.textContent = 'Cancel';
+
+    actions.appendChild(sendEditBtn);
+    actions.appendChild(cancelBtn);
+    wrap.appendChild(textarea);
+    wrap.appendChild(actions);
+
+    // Hide existing body and show edit wrap
+    if (bodyEl) bodyEl.hidden = true;
+    el.appendChild(wrap);
+    textarea.focus();
+    textarea.select();
+
+    function cancelEdit() {
+      wrap.remove();
+      if (bodyEl) bodyEl.hidden = false;
+    }
+
+    cancelBtn.addEventListener('click', cancelEdit);
+
+    async function submitEdit() {
+      const newText = textarea.value.trim();
+      if (!newText) return;
+      cancelEdit();
+      await actionDeleteExchange();
+      await sendText(newText);
+      resetThinkingTimer();
+      resetIdleCaptureTimer();
+    }
+
+    sendEditBtn.addEventListener('click', submitEdit);
+    textarea.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitEdit();
+      }
+      if (e.key === 'Escape') {
+        cancelEdit();
+      }
+    });
+  }
+
+  // ── right-click handler ────────────────────────────────────────────────────
+
+  chatLog.addEventListener('contextmenu', e => {
+    const item = e.target.closest('.chat-item');
+    if (!item) return;
+
+    // Only allow on most-recent assistant or user item (no status items)
+    const isAssistant = item.classList.contains('assistant') && !item.classList.contains('status');
+    const isUser      = item.classList.contains('user')      && !item.classList.contains('status');
+    if (!isAssistant && !isUser) return;
+
+    const role = isAssistant ? 'assistant' : 'user';
+    if (!isLastRealItem(item, role)) return;
+
+    e.preventDefault();
+    hideMenu();
+
+    ctxTarget = item;
+    ctxRole   = role;
+    item.classList.add('ctx-target');
+
+    const menuItems = isAssistant
+      ? [
+          { label: '↺  Regenerate response', action: actionRegenerateAssistant },
+          'sep',
+          { label: '✕  Delete response', cls: 'danger', action: actionDeleteAssistant },
+        ]
+      : [
+          { label: '✎  Edit & resend', action: () => { actionEditUser(item); } },
+          'sep',
+          { label: '✕  Delete message', cls: 'danger', action: actionDeleteExchange },
+        ];
+
+    showMenu(e.clientX, e.clientY, menuItems);
+  });
+
+  // ── close on outside click / scroll / Escape ───────────────────────────────
+
+  document.addEventListener('click', e => {
+    if (!ctxMenu.hidden && !ctxMenu.contains(e.target)) hideMenu();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !ctxMenu.hidden) hideMenu();
+  });
+
+  document.addEventListener('scroll', () => { if (!ctxMenu.hidden) hideMenu(); }, true);
+}());
+

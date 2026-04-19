@@ -21,5 +21,15 @@
       "512x768"
     ],
     "workflow_json": null
+  },
+  "juggernautXL_juggXILightningByRD.safetensors": {
+    "steps": 6,
+    "cfg": 2,
+    "sampler": "dpmpp_2m_sde_gpu",
+    "scheduler": "karras",
+    "resolutions": [
+      "1024x1024"
+    ],
+    "workflow_json": null
   }
 }

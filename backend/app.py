@@ -64,6 +64,7 @@ else:
     COMFYUI_DIR = str(_default_comfyui) if _default_comfyui.is_dir() else ""
 COMFYUI_MODELS_PATH = os.getenv("COMFYUI_MODELS_PATH", "").strip()
 COMFYUI_VRAM_THRESHOLD_GB = float(os.getenv("COMFYUI_VRAM_THRESHOLD_GB", "10"))
+COMFYUI_MIN_VRAM_GB = float(os.getenv("COMFYUI_MIN_VRAM_GB", "2.0"))
 COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
 
 CHAT_MAX_HISTORY = int(os.getenv("CHAT_MAX_HISTORY", "20"))
@@ -199,7 +200,7 @@ _SYSTEM_PROMPT_PRE_TONE = (
     "You have access to tools. Use them when appropriate:\n"
     "- webSearch: search the web when you need current information, facts, or anything you're unsure about.\n"
     "- requestScreenshot: request a screenshot when you need to see what's on the user's screen.\n"
-    "- generateImage: generate an image using AI. Use when the user asks to create, draw, or generate a picture. After it runs, always reply in [SPOKEN] confirming the image is ready.\n"
+    "- generateImage: generate an image using AI. Use when the user asks to create, draw, or generate a picture. Can be called multiple times in the same message to generate more than one image. After all images are generated, always reply in [SPOKEN] confirming they are ready.\n"
     "- memoryStore: store a durable fact about the user (preferences, habits, long-term info). Not for transient moods.\n"
     "  When the user says 'remember this', 'remember that', 'don't forget', 'keep in mind', or similar, ALWAYS use memoryStore to save the relevant fact.\n"
     "  Also use memoryStore proactively when the user reveals a preference, habit, or important personal detail worth retaining.\n"
@@ -379,7 +380,7 @@ def _build_tool_definitions(checkpoint: Optional[str] = None) -> List[Dict[str, 
         "type": "function",
         "function": {
             "name": "generateImage",
-            "description": "Generate an image using AI. Use when the user asks to create, draw, or generate a picture or image.",
+            "description": "Generate an image using AI. Use when the user asks to create, draw, or generate a picture or image. Can be called multiple times in the same message to generate more than one image.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -418,6 +419,7 @@ class ChatRequest(BaseModel):
     max_history: Optional[int] = None
     max_context_tokens: Optional[int] = None
     max_rag_results: Optional[int] = None
+    regenerate: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -1207,6 +1209,22 @@ def _comfyui_free_memory() -> None:
         pass
 
 
+def _comfyui_model_loaded() -> bool:
+    """Return True if ComfyUI already has a model loaded in VRAM (torch_vram_used > 100 MB)."""
+    try:
+        r = requests.get(f"{COMFYUI_BASE_URL}/system_stats", timeout=3)
+        if r.status_code != 200:
+            return False
+        devices = r.json().get("devices", [])
+        for dev in devices:
+            used = dev.get("torch_vram_total", 0) - dev.get("torch_vram_free", 0)
+            if used > 100 * 1024 * 1024:  # >100 MB means a model is resident
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _ollama_warm_model(model: str) -> None:
     """Pre-load an Ollama model into VRAM without generating output."""
     try:
@@ -1574,6 +1592,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     image_base64 = (request.image_base64 or "").strip()
     has_image = bool(image_base64)
     hidden = bool(request.hidden)
+    regenerate = bool(request.regenerate)
     screenshot_followup = bool(request.screenshot_followup)
     search_method = (request.search_method or "searxng").lower()
     personality_id = (request.personality_id or "default").strip()
@@ -1659,7 +1678,7 @@ def chat(request: ChatRequest) -> ChatResponse:
     context_debug = _build_context_debug(messages)
 
     if screenshot_requested:
-        if not hidden and user_text != "[Thinking Tick]":
+        if not hidden and not regenerate and user_text != "[Thinking Tick]":
             active_store.add_message(
                 session_id, "user", user_text or "[Image]", None,
             )
@@ -1677,7 +1696,7 @@ def chat(request: ChatRequest) -> ChatResponse:
 
     spoken_text, silent_text = _parse_sections(raw_content)
 
-    if not hidden and user_text != "[Thinking Tick]":
+    if not hidden and not regenerate and user_text != "[Thinking Tick]":
         active_store.add_message(
             session_id,
             "user",
@@ -1712,6 +1731,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     image_base64 = (request.image_base64 or "").strip()
     has_image = bool(image_base64)
     hidden = bool(request.hidden)
+    regenerate = bool(request.regenerate)
     screenshot_followup = bool(request.screenshot_followup)
     search_method = (request.search_method or "searxng").lower()
     personality_id = (request.personality_id or "default").strip()
@@ -1869,95 +1889,107 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                 results: List[Tuple[str, str, str]] = []
                 image_path_for_injection: Optional[str] = None
 
-                for tc in raw_tool_calls:
-                    name, args, call_id = _normalize_tool_call(tc, provider)
-                    is_screenshot = False
+                # Unload LLM once before all image generation calls if VRAM is tight
+                _image_tool_calls = [
+                    tc for tc in raw_tool_calls
+                    if _normalize_tool_call(tc, provider)[0] == "generateImage"
+                ]
+                ollama_models_unloaded: List[str] = []
+                if _image_tool_calls and _is_comfyui_running() and provider != "openrouter":
+                    free_vram = _get_free_vram_gb()
+                    if (free_vram is not None and
+                            free_vram < COMFYUI_VRAM_THRESHOLD_GB and
+                            free_vram < COMFYUI_MIN_VRAM_GB and
+                            not _comfyui_model_loaded()):
+                        yield json.dumps({
+                            "type": "status",
+                            "text": f"Low VRAM ({free_vram:.1f} GB free) — unloading language model…",
+                        }) + "\n"
+                        ollama_models_unloaded = _ollama_running_models()
+                        for m in ollama_models_unloaded:
+                            _ollama_stop_model(m)
+                        _comfyui_free_memory()
+                        time.sleep(1)
 
-                    if name == "generateImage":
-                        if image_already_generated:
-                            result_text = "Image was already generated. Please respond with a confirmation."
-                        elif not _is_comfyui_running():
-                            result_text = "Error: ComfyUI is not running."
-                        else:
-                            prompt_arg = str(args.get("prompt", "")).strip()
-                            if not prompt_arg:
-                                result_text = "Error: missing prompt parameter."
+                if _image_tool_calls:
+                    yield json.dumps({"type": "image_generation_start", "total": len(_image_tool_calls)}) + "\n"
+
+                try:
+                    image_gen_idx = 0
+                    for tc in raw_tool_calls:
+                        name, args, call_id = _normalize_tool_call(tc, provider)
+                        is_screenshot = False
+
+                        if name == "generateImage":
+                            if not _is_comfyui_running():
+                                result_text = "Error: ComfyUI is not running."
                             else:
-                                negative_prompt_arg = str(args.get("negative_prompt", ""))
-                                resolution_arg = str(args.get("resolution", "1024x1024"))
-                                try:
-                                    w, h = map(int, resolution_arg.split("x"))
-                                except ValueError:
-                                    w, h = 1024, 1024
+                                prompt_arg = str(args.get("prompt", "")).strip()
+                                if not prompt_arg:
+                                    result_text = "Error: missing prompt parameter."
+                                else:
+                                    negative_prompt_arg = str(args.get("negative_prompt", ""))
+                                    resolution_arg = str(args.get("resolution", "1024x1024"))
+                                    try:
+                                        w, h = map(int, resolution_arg.split("x"))
+                                    except ValueError:
+                                        w, h = 1024, 1024
 
-                                settings = _get_model_settings(COMFYUI_CHECKPOINT)
+                                    settings = _get_model_settings(COMFYUI_CHECKPOINT)
+                                    image_gen_idx += 1
+                                    yield json.dumps({"type": "status", "text": f"Generating image {image_gen_idx}/{len(_image_tool_calls)}…"}) + "\n"
+                                    COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
+                                    try:
+                                        from comfyui_service import generate as _comfyui_generate
+                                        file_path = _comfyui_generate(
+                                            prompt=prompt_arg, negative_prompt=negative_prompt_arg,
+                                            checkpoint=COMFYUI_CHECKPOINT, width=w, height=h,
+                                            steps=settings["steps"], cfg=settings["cfg"],
+                                            sampler=settings["sampler"], scheduler=settings["scheduler"],
+                                            output_dir=COMFYUI_OUTPUT_DIR, base_url=COMFYUI_BASE_URL,
+                                            workflow_json=settings.get("workflow_json"),
+                                        )
+                                        result_text = f"__IMAGE_GENERATED__:{file_path}"
+                                        image_already_generated = True
+                                    except Exception as exc:
+                                        result_text = f"Image generation failed: {exc}"
+                        else:
+                            result_text, is_screenshot = _execute_tool(
+                                name, args, active_yaml_store, search_method
+                            )
 
-                                ollama_models_unloaded: List[str] = []
-                                if provider != "openrouter":
-                                    free_vram = _get_free_vram_gb()
-                                    if free_vram is not None and free_vram < COMFYUI_VRAM_THRESHOLD_GB:
-                                        yield json.dumps({
-                                            "type": "status",
-                                            "text": f"Low VRAM ({free_vram:.1f} GB free) — unloading language model…",
-                                        }) + "\n"
-                                        ollama_models_unloaded = _ollama_running_models()
-                                        for m in ollama_models_unloaded:
-                                            _ollama_stop_model(m)
-                                        _comfyui_free_memory()
-                                        time.sleep(1)
+                        if result_text.startswith("__IMAGE_GENERATED__:"):
+                            image_path_for_injection = result_text[len("__IMAGE_GENERATED__:"):]
+                            filename = Path(image_path_for_injection).name
+                            image_url = f"/generated_images/{filename}"
+                            result_text = (
+                                "Image successfully generated and is now displayed to the user in the chat. "
+                                "Respond with a [SPOKEN] message confirming the image is ready and briefly "
+                                "describing or commenting on what was generated."
+                            )
+                            yield json.dumps({"type": "image_ready", "url": image_url}) + "\n"
 
-                                yield json.dumps({"type": "status", "text": "Generating image…"}) + "\n"
-                                COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
-                                try:
-                                    from comfyui_service import generate as _comfyui_generate
-                                    file_path = _comfyui_generate(
-                                        prompt=prompt_arg, negative_prompt=negative_prompt_arg,
-                                        checkpoint=COMFYUI_CHECKPOINT, width=w, height=h,
-                                        steps=settings["steps"], cfg=settings["cfg"],
-                                        sampler=settings["sampler"], scheduler=settings["scheduler"],
-                                        output_dir=COMFYUI_OUTPUT_DIR, base_url=COMFYUI_BASE_URL,
-                                        workflow_json=settings.get("workflow_json"),
-                                    )
-                                    result_text = f"__IMAGE_GENERATED__:{file_path}"
-                                    image_already_generated = True
-                                except Exception as exc:
-                                    result_text = f"Image generation failed: {exc}"
-                                finally:
-                                    if ollama_models_unloaded:
-                                        yield json.dumps({
-                                            "type": "status",
-                                            "text": "Reloading language model…",
-                                        }) + "\n"
-                                        _comfyui_free_memory()
-                                        _ollama_warm_model(selected_model)
-                    else:
-                        result_text, is_screenshot = _execute_tool(
-                            name, args, active_yaml_store, search_method
-                        )
+                        tool_calls_made.append({
+                            "name": name,
+                            "args": args,
+                            "result_summary": result_text[:200] if len(result_text) > 200 else result_text,
+                        })
 
-                    if result_text.startswith("__IMAGE_GENERATED__:"):
-                        image_path_for_injection = result_text[len("__IMAGE_GENERATED__:"):]
-                        filename = Path(image_path_for_injection).name
-                        image_url = f"/generated_images/{filename}"
-                        result_text = (
-                            "Image successfully generated and is now displayed to the user in the chat. "
-                            "Respond with a [SPOKEN] message confirming the image is ready and briefly "
-                            "describing or commenting on what was generated."
-                        )
-                        yield json.dumps({"type": "image_ready", "url": image_url}) + "\n"
+                        if is_screenshot:
+                            screenshot_requested = True
+                            screenshot_reason = str(args.get("reason", "Model requested a screenshot"))
+                            result_text = "Screenshot has been requested from the user. It will be provided in a follow-up message."
 
-                    tool_calls_made.append({
-                        "name": name,
-                        "args": args,
-                        "result_summary": result_text[:200] if len(result_text) > 200 else result_text,
-                    })
-
-                    if is_screenshot:
-                        screenshot_requested = True
-                        screenshot_reason = str(args.get("reason", "Model requested a screenshot"))
-                        result_text = "Screenshot has been requested from the user. It will be provided in a follow-up message."
-
-                    results.append((call_id, name, result_text))
+                        results.append((call_id, name, result_text))
+                finally:
+                    # Reload LLM once after all image generation calls complete
+                    if ollama_models_unloaded:
+                        yield json.dumps({
+                            "type": "status",
+                            "text": "Reloading language model…",
+                        }) + "\n"
+                        _comfyui_free_memory()
+                        _ollama_warm_model(selected_model)
 
                 _append_tool_result_messages(messages, data, raw_tool_calls, results, provider)
 
@@ -1984,7 +2016,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         context_debug = _build_context_debug(messages)
 
         if screenshot_requested:
-            if not hidden and user_text != "[Thinking Tick]":
+            if not hidden and not regenerate and user_text != "[Thinking Tick]":
                 active_store.add_message(session_id, "user", user_text or "[Image]", None)
             yield json.dumps({"type": "request_screenshot", "reason": screenshot_reason}) + "\n"
             yield json.dumps({
@@ -1993,7 +2025,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             }) + "\n"
             return
 
-        if not hidden and user_text != "[Thinking Tick]":
+        if not hidden and not regenerate and user_text != "[Thinking Tick]":
             active_store.add_message(
                 session_id,
                 "user",
@@ -2055,6 +2087,24 @@ def list_models(provider: Optional[str] = None) -> ModelListResponse:
     return ModelListResponse(
         models=models, default_model=OLLAMA_MODEL, provider=selected_provider
     )
+
+
+@app.delete("/api/session/{session_id}/last_exchange")
+def delete_last_exchange(session_id: str, personality_id: Optional[str] = None) -> Dict[str, Any]:
+    """Delete the last user + assistant message pair for a session (used when deleting a response)."""
+    pid = (personality_id or "default").strip()
+    store = _get_store(pid)
+    deleted = store.delete_last_n_messages(session_id, n=2)
+    return {"deleted": deleted}
+
+
+@app.delete("/api/session/{session_id}/last_assistant")
+def delete_last_assistant(session_id: str, personality_id: Optional[str] = None) -> Dict[str, Any]:
+    """Delete only the last assistant message for a session (used when regenerating a response)."""
+    pid = (personality_id or "default").strip()
+    store = _get_store(pid)
+    deleted = store.delete_last_n_messages(session_id, n=1)
+    return {"deleted": deleted}
 
 
 @app.delete("/api/personality/{personality_id}/memory")

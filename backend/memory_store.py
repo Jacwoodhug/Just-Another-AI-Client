@@ -108,3 +108,22 @@ class MemoryStore:
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return [item[1] for item in scored[:top_k]]
+
+    def delete_last_n_messages(self, session_id: str, n: int = 2) -> int:
+        """Delete the last *n* messages for the given session. Returns the count deleted."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM memory
+                WHERE session_id = ? AND role IN ('user', 'assistant')
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (session_id, n),
+            ).fetchall()
+            if not rows:
+                return 0
+            ids = [row[0] for row in rows]
+            placeholders = ",".join("?" * len(ids))
+            conn.execute(f"DELETE FROM memory WHERE id IN ({placeholders});", ids)
+            return len(ids)
