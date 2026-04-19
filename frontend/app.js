@@ -604,11 +604,9 @@ function renderSessionList() {
       actions.appendChild(saveBtn);
       actions.appendChild(cancelBtn);
     } else {
-      const openBtn = document.createElement("button");
-      openBtn.type = "button";
-      openBtn.className = "small";
-      openBtn.textContent = "Open";
-      openBtn.addEventListener("click", () => {
+      item.style.cursor = "pointer";
+      item.addEventListener("click", (e) => {
+        if (e.target.closest("button")) return;
         switchSession(entry.id);
       });
 
@@ -630,7 +628,6 @@ function renderSessionList() {
         deleteSession(entry.id);
       });
 
-      actions.appendChild(openBtn);
       actions.appendChild(renameBtn);
       actions.appendChild(deleteBtn);
     }
@@ -713,7 +710,8 @@ function saveOrUpdateImageGroup(saveId, dataUrl) {
   let history = [];
   try { history = JSON.parse(localStorage.getItem(key) || "[]"); } catch(_) { history = []; }
   if (!Array.isArray(history)) history = [];
-  const entry = { role: "assistant", text: "[Generated images]", groupId: saveId, imageDataUrls: [..._currentImageGroupDataUrls] };
+  const activePersonalityName = getActivePersonality().name;
+  const entry = { role: "assistant", text: "[Generated images]", groupId: saveId, imageDataUrls: [..._currentImageGroupDataUrls], personalityName: activePersonalityName !== "default" ? activePersonalityName : undefined };
   const idx = history.findIndex(e => e.groupId === saveId);
   if (idx >= 0) {
     history[idx] = entry;
@@ -730,17 +728,18 @@ function saveOrUpdateImageGroup(saveId, dataUrl) {
   touchSession(sessionId);
 }
 
-function createImageGroupItem(role, dataUrls) {
+function createImageGroupItem(role, dataUrls, personalityName) {
   const item = document.createElement("div");
   item.className = `chat-item ${role}`;
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = role === "user" ? "You" : "Assistant";
-  const grid = document.createElement("div");
-  grid.className = "image-grid";
-  grid.dataset.count = String(Math.min(dataUrls.length, 4));
+  meta.textContent = role === "user" ? "You" : (personalityName && personalityName !== "default" ? personalityName : "Assistant");
+  if (personalityName && personalityName !== "default") item.dataset.personality = personalityName;
+
   item.appendChild(meta);
   item.appendChild(grid);
+
+  if (role === "assistant") _applyPersonalityColors(item, meta, personalityName);
   dataUrls.forEach((src, i) => {
     const cell = document.createElement("div");
     cell.className = "image-grid-cell";
@@ -763,7 +762,7 @@ function createImageGroupItem(role, dataUrls) {
   chatLog.scrollTop = chatLog.scrollHeight;
 }
 
-function saveChatMessage(role, text, imageDataUrl) {
+function saveChatMessage(role, text, imageDataUrl, personalityName) {
   const trimmed = (text || "").trim();
   if (!trimmed || !sessionId) {
     return;
@@ -783,6 +782,7 @@ function saveChatMessage(role, text, imageDataUrl) {
   }
   const entry = { role, text: trimmed };
   if (imageDataUrl) entry.imageDataUrl = imageDataUrl;
+  if (role === "assistant" && personalityName && personalityName !== "default") entry.personalityName = personalityName;
   history.push(entry);
   if (history.length > CHAT_HISTORY_LIMIT) {
     history = history.slice(-CHAT_HISTORY_LIMIT);
@@ -820,9 +820,9 @@ function loadChatHistory() {
     }
     const role = item.role === "assistant" ? "assistant" : "user";
     if (item.imageDataUrls && Array.isArray(item.imageDataUrls) && item.imageDataUrls.length > 0) {
-      createImageGroupItem(role, item.imageDataUrls);
+      createImageGroupItem(role, item.imageDataUrls, item.personalityName);
     } else {
-      createChatItem(role, item.text, undefined, item.imageDataUrl || "");
+      createChatItem(role, item.text, undefined, item.imageDataUrl || "", item.personalityName);
     }
   });
 }
@@ -1348,7 +1348,17 @@ function attachImageFile(file) {
   reader.readAsDataURL(file);
 }
 
-function createChatItem(role, text, variant, imageDataUrl) {
+function _applyPersonalityColors(item, meta, personalityName) {
+  if (!personalityName || personalityName === "default") return;
+  const p = personalities.find((x) => x.name === personalityName);
+  if (!p) return;
+  if (p.bubbleBg) item.style.background = p.bubbleBg;
+  if (p.bubbleBorder) item.style.borderColor = p.bubbleBorder;
+  if (p.bubbleText) item.style.color = p.bubbleText;
+  if (p.bubbleName && meta) meta.style.color = p.bubbleName;
+}
+
+function createChatItem(role, text, variant, imageDataUrl, personalityName) {
   const item = document.createElement("div");
   item.className = `chat-item ${role}`;
   if (variant) {
@@ -1357,13 +1367,16 @@ function createChatItem(role, text, variant, imageDataUrl) {
 
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = role === "user" ? "You" : "Assistant";
+  meta.textContent = role === "user" ? "You" : (personalityName && personalityName !== "default" ? personalityName : "Assistant");
+  if (personalityName && personalityName !== "default") item.dataset.personality = personalityName;
+
+  item.appendChild(meta);
 
   const body = document.createElement("div");
   body.textContent = text;
-
-  item.appendChild(meta);
   item.appendChild(body);
+
+  if (role === "assistant") _applyPersonalityColors(item, meta, personalityName);
 
   if (imageDataUrl) {
     const grid = document.createElement("div");
@@ -1385,9 +1398,9 @@ function createChatItem(role, text, variant, imageDataUrl) {
   return { item, body };
 }
 
-function addChat(role, text, imageDataUrl) {
-  createChatItem(role, text, undefined, imageDataUrl);
-  saveChatMessage(role, text, imageDataUrl);
+function addChat(role, text, imageDataUrl, personalityName) {
+  createChatItem(role, text, undefined, imageDataUrl, personalityName);
+  saveChatMessage(role, text, imageDataUrl, personalityName);
   // Ensure scroll happens after DOM update
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -1754,7 +1767,8 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
   const requestedScreenshot = spokenRequest.requested || silentRequest.requested;
 
   if (spokenText) {
-    addChat("assistant", spokenText);
+    const _pName = getActivePersonality().name;
+    addChat("assistant", spokenText, undefined, _pName !== "default" ? _pName : undefined);
     speak(spokenText);
   }
   if (silentText) {
@@ -1890,6 +1904,7 @@ async function sendText(text, options = {}) {
     let silentText = "";
     let receivedMeta = false;
     let streamHadError = false;
+    const _streamPersonalityName = (() => { const n = getActivePersonality().name; return n !== "default" ? n : undefined; })();
     speechBuffer = "";
     let requestedScreenshot = false;
     let requestReason = "";
@@ -1995,7 +2010,7 @@ async function sendText(text, options = {}) {
             requestedScreenshot = true;
           }
           if (!assistantItem) {
-            assistantItem = createChatItem("assistant", "");
+            assistantItem = createChatItem("assistant", "", undefined, undefined, _streamPersonalityName);
           }
           const spokenDisplay = spokenText.trimEnd();
           assistantItem.body.textContent = spokenDisplay;
@@ -2062,7 +2077,7 @@ async function sendText(text, options = {}) {
             addThinkingMessage("Assistant chose to stay silent.");
           }
           if (spokenText.trim()) {
-            saveChatMessage("assistant", spokenText);
+            saveChatMessage("assistant", spokenText, undefined, _streamPersonalityName);
           }
           if (shouldClearAttachment && !streamHadError) {
             clearImage();
@@ -2998,6 +3013,14 @@ function openPersonalityEditor(id) {
     peUpdateTtsProviderUI();
     populatePeVoiceSelect(p.ttsVoice || "");
     if (peSeparateMemory) peSeparateMemory.checked = !!p.separateMemory;
+    const bgEl = document.getElementById("peBgColor");
+    const bdEl = document.getElementById("peBorderColor");
+    const txEl = document.getElementById("peTextColor");
+    const nmEl = document.getElementById("peNameColor");
+    if (bgEl) bgEl.value = p.bubbleBg || "#1a3d36";
+    if (bdEl) bdEl.value = p.bubbleBorder || "#3fa08c";
+    if (txEl) txEl.value = p.bubbleText || "#e8ddd0";
+    if (nmEl) nmEl.value = p.bubbleName || "#7ecfc0";
   } else {
     if (personalityEditorTitle) personalityEditorTitle.textContent = "New Personality";
     if (peNameInput) peNameInput.value = "";
@@ -3006,8 +3029,37 @@ function openPersonalityEditor(id) {
     peUpdateTtsProviderUI();
     populatePeVoiceSelect("");
     if (peSeparateMemory) peSeparateMemory.checked = false;
+    const bgEl = document.getElementById("peBgColor");
+    const bdEl = document.getElementById("peBorderColor");
+    const txEl = document.getElementById("peTextColor");
+    const nmEl = document.getElementById("peNameColor");
+    if (bgEl) bgEl.value = "#1a3d36";
+    if (bdEl) bdEl.value = "#3fa08c";
+    if (txEl) txEl.value = "#e8ddd0";
+    if (nmEl) nmEl.value = "#7ecfc0";
   }
   showPersonalityEditor(true);
+  updatePeColorPreview();
+}
+
+function _refreshChatBubbleColors() {
+  document.querySelectorAll(".chat-item.assistant").forEach((item) => {
+    const meta = item.querySelector(".meta");
+    // Match by data-personality attribute (reliable) or fall back to meta text
+    const pName = item.dataset.personality || (meta ? meta.textContent.trim() : "");
+    const p = pName ? personalities.find((x) => x.name === pName) : null;
+    if (p) {
+      item.style.background = p.bubbleBg || "";
+      item.style.borderColor = p.bubbleBorder || "";
+      item.style.color = p.bubbleText || "";
+      if (meta) meta.style.color = p.bubbleName || "";
+    } else {
+      item.style.background = "";
+      item.style.borderColor = "";
+      item.style.color = "";
+      if (meta) meta.style.color = "";
+    }
+  });
 }
 
 function savePersonalityEditor() {
@@ -3019,11 +3071,15 @@ function savePersonalityEditor() {
   const toneContext = peToneInput ? peToneInput.value.trim() : "";
   const ttsVoice = peTtsVoiceSelect ? peTtsVoiceSelect.value : "";
   const separateMemory = peSeparateMemory ? peSeparateMemory.checked : false;
+  const bubbleBg = (document.getElementById("peBgColor"))?.value || "";
+  const bubbleBorder = (document.getElementById("peBorderColor"))?.value || "";
+  const bubbleText = (document.getElementById("peTextColor"))?.value || "";
+  const bubbleName = (document.getElementById("peNameColor"))?.value || "";
 
   if (peEditingId) {
     const idx = personalities.findIndex((p) => p.id === peEditingId);
     if (idx !== -1) {
-      personalities[idx] = { ...personalities[idx], name, toneContext, ttsProvider: peTtsProvider, ttsVoice, separateMemory };
+      personalities[idx] = { ...personalities[idx], name, toneContext, ttsProvider: peTtsProvider, ttsVoice, separateMemory, bubbleBg, bubbleBorder, bubbleText, bubbleName };
     }
   } else {
     personalities.push({
@@ -3033,11 +3089,16 @@ function savePersonalityEditor() {
       ttsProvider: peTtsProvider,
       ttsVoice,
       separateMemory,
+      bubbleBg,
+      bubbleBorder,
+      bubbleText,
+      bubbleName,
     });
   }
   savePersonalities();
   renderPersonalityList();
   renderPersonalitySelect();
+  _refreshChatBubbleColors();
   showPersonalityEditor(false);
 }
 
@@ -3083,6 +3144,45 @@ if (personalityAddBtn) {
 if (peSaveBtn) {
   peSaveBtn.addEventListener("click", savePersonalityEditor);
 }
+
+const peColorReset = document.getElementById("peColorReset");
+if (peColorReset) {
+  peColorReset.addEventListener("click", () => {
+    const bgEl = document.getElementById("peBgColor");
+    const bdEl = document.getElementById("peBorderColor");
+    const txEl = document.getElementById("peTextColor");
+    const nmEl = document.getElementById("peNameColor");
+    if (bgEl) bgEl.value = "#1a3d36";
+    if (bdEl) bdEl.value = "#3fa08c";
+    if (txEl) txEl.value = "#e8ddd0";
+    if (nmEl) nmEl.value = "#7ecfc0";
+    updatePeColorPreview();
+  });
+}
+
+function updatePeColorPreview() {
+  const preview = document.getElementById("peColorPreview");
+  const previewName = document.getElementById("pePreviewName");
+  const previewText = document.getElementById("pePreviewText");
+  if (!preview) return;
+  const bg = document.getElementById("peBgColor")?.value || "";
+  const border = document.getElementById("peBorderColor")?.value || "";
+  const text = document.getElementById("peTextColor")?.value || "";
+  const name = document.getElementById("peNameColor")?.value || "";
+  const nameInput = document.getElementById("peNameInput")?.value.trim() || "Personality Name";
+  if (bg) preview.style.background = bg;
+  if (border) preview.style.borderColor = border;
+  if (text && previewText) previewText.style.color = text;
+  if (name && previewName) previewName.style.color = name;
+  if (previewName) previewName.textContent = nameInput;
+}
+
+["peBgColor", "peBorderColor", "peTextColor", "peNameColor"].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", updatePeColorPreview);
+});
+const peNameInputEl = document.getElementById("peNameInput");
+if (peNameInputEl) peNameInputEl.addEventListener("input", updatePeColorPreview);
 
 if (peCancelBtn) {
   peCancelBtn.addEventListener("click", () => showPersonalityEditor(false));

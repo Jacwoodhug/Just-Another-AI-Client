@@ -1358,6 +1358,57 @@ input {
   padding: 6px 12px;
 }
 
+.pe-color-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.pe-color-swatch-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pe-color-swatch-label input[type="color"] {
+  width: 40px;
+  height: 32px;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+  padding: 2px;
+  background: none;
+  cursor: pointer;
+}
+
+.pe-color-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--stroke);
+  background: rgba(74, 160, 140, 0.16);
+  margin-top: 10px;
+  max-width: 340px;
+}
+
+.pe-preview-name {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+
+.pe-preview-text {
+  font-size: 14px;
+  color: var(--ink);
+}
+
 #comfyuiCheckpointSelect {
   border: 1px solid var(--stroke);
   background: rgba(24, 18, 12, 0.9);

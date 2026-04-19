@@ -360,6 +360,27 @@
             <input id="peSeparateMemory" type="checkbox" />
             Separate memory
           </label>
+          <div class="personality-field-label">Bubble Colors
+            <div class="pe-color-row">
+              <label class="pe-color-swatch-label">Background
+                <input id="peBgColor" type="color" value="#1a3d36" />
+              </label>
+              <label class="pe-color-swatch-label">Border
+                <input id="peBorderColor" type="color" value="#3fa08c" />
+              </label>
+              <label class="pe-color-swatch-label">Text
+                <input id="peTextColor" type="color" value="#e8ddd0" />
+              </label>
+              <label class="pe-color-swatch-label">Name
+                <input id="peNameColor" type="color" value="#7ecfc0" />
+              </label>
+              <button class="ghost small" id="peColorReset" type="button">Reset</button>
+            </div>
+            <div class="pe-color-preview" id="peColorPreview">
+              <div class="pe-preview-name" id="pePreviewName">Personality Name</div>
+              <div class="pe-preview-text" id="pePreviewText">This is what a response will look like with these colors applied to the chat bubble.</div>
+            </div>
+          </div>
         </div>
         <div class="personality-editor-actions">
           <button class="primary small" id="peSaveBtn" type="button">Save</button>
