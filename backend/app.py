@@ -547,11 +547,28 @@ def _ollama_embeddings(text: str) -> List[float]:
     return []
 
 
+def _merge_system_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge consecutive system messages into one for model compatibility."""
+    merged: List[Dict[str, Any]] = []
+    system_parts: List[str] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_parts.append(msg["content"])
+        else:
+            if system_parts:
+                merged.append({"role": "system", "content": "\n\n".join(system_parts)})
+                system_parts = []
+            merged.append(msg)
+    if system_parts:
+        merged.append({"role": "system", "content": "\n\n".join(system_parts)})
+    return merged
+
+
 def _ollama_chat(messages: List[Dict[str, str]], model: str) -> str:
     url = f"{OLLAMA_BASE_URL}/api/chat"
     payload = {
         "model": model,
-        "messages": messages,
+        "messages": _merge_system_messages(messages),
         "stream": False,
     }
     response = requests.post(url, json=payload, timeout=120)
@@ -1005,7 +1022,10 @@ def _ollama_chat_with_tools(
 ) -> Dict[str, Any]:
     """Ollama chat with tool support — returns the full response dict."""
     url = f"{OLLAMA_BASE_URL}/api/chat"
-    payload = {"model": model, "messages": messages, "stream": False, "tools": tools}
+    effective_tools = tools if (tools and _ollama_model_supports_tools(model)) else []
+    payload: Dict[str, Any] = {"model": model, "messages": _merge_system_messages(messages), "stream": False}
+    if effective_tools:
+        payload["tools"] = effective_tools
     response = requests.post(url, json=payload, timeout=120)
     response.raise_for_status()
     return response.json()
@@ -1235,20 +1255,42 @@ def _ollama_warm_model(model: str) -> None:
         pass
 
 
+_ollama_model_info_cache: Dict[str, Any] = {}
+
+
+def _ollama_get_model_info(model: str) -> Dict[str, Any]:
+    """Return cached /api/show response for a model."""
+    if model not in _ollama_model_info_cache:
+        try:
+            resp = requests.post(
+                f"{OLLAMA_BASE_URL}/api/show",
+                json={"model": model},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            _ollama_model_info_cache[model] = resp.json()
+        except Exception:
+            _ollama_model_info_cache[model] = {}
+    return _ollama_model_info_cache[model]
+
+
 def _ollama_model_is_multimodal(model: str) -> bool:
     """Return True if the Ollama model has 'clip' in its families (i.e. is multimodal)."""
-    try:
-        resp = requests.post(
-            f"{OLLAMA_BASE_URL}/api/show",
-            json={"model": model},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        details = resp.json().get("details", {})
-        families = details.get("families") or []
-        return "clip" in families
-    except Exception:
-        return False
+    info = _ollama_get_model_info(model)
+    families = info.get("details", {}).get("families") or []
+    return "clip" in families
+
+
+def _ollama_model_supports_tools(model: str) -> bool:
+    """Return True if the Ollama model supports function/tool calling."""
+    info = _ollama_get_model_info(model)
+    # Newer Ollama versions expose a capabilities list
+    capabilities = info.get("capabilities") or []
+    if capabilities:
+        return "tools" in capabilities
+    # Fallback: check if the model template contains tool markers
+    template = info.get("template") or ""
+    return "{{ if .Tools }}" in template or "{{- if .Tools }}" in template or ".Tools" in template
 
 
 # ---------------------------------------------------------------------------
@@ -1367,7 +1409,7 @@ def shutdown_cleanup() -> None:
 
 def _ollama_chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[str]:
     url = f"{OLLAMA_BASE_URL}/api/chat"
-    payload = {"model": model, "messages": messages, "stream": True}
+    payload = {"model": model, "messages": _merge_system_messages(messages), "stream": True}
     with requests.post(url, json=payload, stream=True, timeout=120) as response:
         response.raise_for_status()
         for line in response.iter_lines(decode_unicode=True):
@@ -1448,7 +1490,10 @@ def _ollama_stream_first_call(
 ) -> Iterable[Tuple[str, Any]]:
     """Stream Ollama first call. Yields ("token", text) per chunk then ("final", data_dict)."""
     url = f"{OLLAMA_BASE_URL}/api/chat"
-    payload = {"model": model, "messages": messages, "stream": True, "tools": tools}
+    effective_tools = tools if (tools and _ollama_model_supports_tools(model)) else []
+    payload: Dict[str, Any] = {"model": model, "messages": _merge_system_messages(messages), "stream": True}
+    if effective_tools:
+        payload["tools"] = effective_tools
     with requests.post(url, json=payload, stream=True, timeout=120) as response:
         response.raise_for_status()
         for line in response.iter_lines(decode_unicode=True):
