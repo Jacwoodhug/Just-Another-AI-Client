@@ -1857,6 +1857,7 @@ async function sendText(text, options = {}) {
             _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
           }
           _generatingStatusItem = null;
+          hideTypingIndicator();
           const toolCalls = Array.isArray(message.tool_calls_made)
             ? message.tool_calls_made
             : [];
@@ -1882,7 +1883,7 @@ async function sendText(text, options = {}) {
               thinkingSilentList.appendChild(placeholder);
             }
           }
-          if (!spokenText.trim() && !silentText.trim() && !requestedScreenshot) {
+          if (!spokenText.trim() && !silentText.trim() && !requestedScreenshot && toolCalls.length === 0) {
             addThinkingMessage("Assistant chose to stay silent.");
           }
           if (spokenText.trim()) {

@@ -1746,6 +1746,22 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             data = first_data
             raw_tool_calls = _get_tool_calls_from_response(data, provider)
 
+            # Fallback: if streaming produced no text and no tool calls, the LLM likely
+            # intended a tool call but the streaming done message didn't include tool_calls
+            # (a known limitation of some Ollama/OpenRouter streaming responses).
+            # Re-run the first call non-streaming to reliably detect tool calls.
+            if not raw_tool_calls and not spoken_text.strip() and not silent_text.strip():
+                data = _llm_chat_with_tools(messages, selected_model, tools, provider)
+                raw_tool_calls = _get_tool_calls_from_response(data, provider)
+                if not raw_tool_calls:
+                    # Genuinely no tool calls — yield whatever text the model produced.
+                    raw_content = _get_content_from_response(data, provider)
+                    spoken_text, silent_text = _parse_sections(raw_content)
+                    if spoken_text:
+                        yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
+                    if silent_text:
+                        yield json.dumps({"type": "token", "channel": "silent", "text": silent_text}) + "\n"
+
             # ── Tool loop ──
             # iteration_count 0 uses first_data (already streamed).
             # Subsequent iterations use non-streaming _llm_chat_with_tools.
