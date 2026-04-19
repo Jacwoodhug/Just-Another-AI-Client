@@ -647,11 +647,15 @@ function deleteSession(id) {
   }
   const name = getSessionName(id);
   const confirmDelete = window.confirm(
-    `Delete session "${name}"? This cannot be undone.`
+    `Delete session "${name}"? This will also delete all images generated in this session and cannot be undone.`
   );
   if (!confirmDelete) {
     return;
   }
+
+  const personalityId = getSessionPersonalityId(id);
+  const params = personalityId ? `?personality_id=${encodeURIComponent(personalityId)}` : "";
+  fetch(`/api/session/${encodeURIComponent(id)}${params}`, { method: "DELETE" }).catch(() => {});
 
   const sessions = getSessions().filter((session) => session.id !== id);
   saveSessions(sessions);

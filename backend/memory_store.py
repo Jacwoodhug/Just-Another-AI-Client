@@ -127,3 +127,12 @@ class MemoryStore:
             placeholders = ",".join("?" * len(ids))
             conn.execute(f"DELETE FROM memory WHERE id IN ({placeholders});", ids)
             return len(ids)
+
+    def delete_session(self, session_id: str) -> int:
+        """Delete all messages for the given session. Returns the count deleted."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM memory WHERE session_id = ?;",
+                (session_id,),
+            )
+            return cursor.rowcount

@@ -914,6 +914,7 @@ def _execute_tool(
     args: Dict[str, Any],
     active_yaml_store: YamlMemoryStore,
     search_method: str,
+    session_id: str = "",
 ) -> Tuple[str, bool]:
     """Execute a tool call. Returns (result_string, is_screenshot_request)."""
     if name == "webSearch":
@@ -975,6 +976,7 @@ def _execute_tool(
                 sampler=settings["sampler"], scheduler=settings["scheduler"],
                 output_dir=COMFYUI_OUTPUT_DIR, base_url=COMFYUI_BASE_URL,
                 workflow_json=settings.get("workflow_json"),
+                session_id=session_id,
             )
             return f"__IMAGE_GENERATED__:{file_path}", False
         except Exception as exc:
@@ -1117,6 +1119,7 @@ def _run_tool_loop(
     active_yaml_store: YamlMemoryStore,
     search_method: str,
     max_iterations: int = 6,
+    session_id: str = "",
 ) -> Tuple[str, List[Dict[str, Any]], bool, str]:
     """
     Agentic tool loop.
@@ -1139,7 +1142,7 @@ def _run_tool_loop(
         for tc in raw_tool_calls:
             name, args, call_id = _normalize_tool_call(tc, provider)
             result_text, is_screenshot = _execute_tool(
-                name, args, active_yaml_store, search_method
+                name, args, active_yaml_store, search_method, session_id
             )
 
             if result_text.startswith("__IMAGE_GENERATED__:"):
@@ -1199,6 +1202,8 @@ def _get_free_vram_gb() -> Optional[float]:
 
 def _comfyui_free_memory() -> None:
     """Ask ComfyUI to unload models and free memory."""
+    global _comfyui_model_in_vram
+    _comfyui_model_in_vram = False
     try:
         requests.post(
             f"{COMFYUI_BASE_URL}/free",
@@ -1209,21 +1214,13 @@ def _comfyui_free_memory() -> None:
         pass
 
 
+# True after a successful generation; cleared when _comfyui_free_memory() is called.
+_comfyui_model_in_vram: bool = False
+
+
 def _comfyui_model_loaded() -> bool:
-    """Return True if ComfyUI already has a model loaded in VRAM (actual vram_used > 500 MB)."""
-    try:
-        r = requests.get(f"{COMFYUI_BASE_URL}/system_stats", timeout=3)
-        if r.status_code != 200:
-            return False
-        devices = r.json().get("devices", [])
-        for dev in devices:
-            # Use vram_total/vram_free (actual GPU VRAM), not torch_vram_* (tiny reserved pool)
-            used = dev.get("vram_total", 0) - dev.get("vram_free", 0)
-            if used > 500 * 1024 * 1024:  # >500 MB means a model is resident
-                return True
-        return False
-    except Exception:
-        return False
+    """Return True if the image model is known to be resident in VRAM."""
+    return _comfyui_model_in_vram
 
 
 def _ollama_warm_model(model: str) -> None:
@@ -1670,7 +1667,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         raw_content, tool_calls_made, screenshot_requested, screenshot_reason = (
             _run_tool_loop(
                 messages, _build_tool_definitions(COMFYUI_CHECKPOINT), selected_model, provider,
-                active_yaml_store, search_method,
+                active_yaml_store, search_method, session_id=session_id,
             )
         )
     except (requests.RequestException, RuntimeError) as exc:
@@ -1952,20 +1949,24 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                                             sampler=settings["sampler"], scheduler=settings["scheduler"],
                                             output_dir=COMFYUI_OUTPUT_DIR, base_url=COMFYUI_BASE_URL,
                                             workflow_json=settings.get("workflow_json"),
+                                            session_id=session_id,
                                         )
                                         result_text = f"__IMAGE_GENERATED__:{file_path}"
                                         image_already_generated = True
+                                        global _comfyui_model_in_vram
+                                        _comfyui_model_in_vram = True
                                     except Exception as exc:
                                         result_text = f"Image generation failed: {exc}"
                         else:
                             result_text, is_screenshot = _execute_tool(
-                                name, args, active_yaml_store, search_method
+                                name, args, active_yaml_store, search_method, session_id
                             )
 
                         if result_text.startswith("__IMAGE_GENERATED__:"):
                             image_path_for_injection = result_text[len("__IMAGE_GENERATED__:"):]
                             filename = Path(image_path_for_injection).name
-                            image_url = f"/generated_images/{filename}"
+                            short_id = session_id.split("-")[0] if session_id else ""
+                            image_url = f"/generated_images/{short_id}/{filename}" if short_id else f"/generated_images/{filename}"
                             result_text = (
                                 "Image successfully generated and is now displayed to the user in the chat. "
                                 "Respond with a [SPOKEN] message confirming the image is ready and briefly "
@@ -2092,6 +2093,20 @@ def list_models(provider: Optional[str] = None) -> ModelListResponse:
     return ModelListResponse(
         models=models, default_model=OLLAMA_MODEL, provider=selected_provider
     )
+
+
+@app.delete("/api/session/{session_id}")
+def delete_session(session_id: str, personality_id: Optional[str] = None) -> Dict[str, Any]:
+    """Delete all messages for a session and remove its generated images folder."""
+    pid = (personality_id or "default").strip()
+    store = _get_store(pid)
+    deleted = store.delete_session(session_id)
+    import shutil
+    short_id = session_id.split("-")[0] if session_id else ""
+    image_folder = COMFYUI_OUTPUT_DIR / short_id
+    if image_folder.exists():
+        shutil.rmtree(image_folder)
+    return {"deleted": deleted}
 
 
 @app.delete("/api/session/{session_id}/last_exchange")

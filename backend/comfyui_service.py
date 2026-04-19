@@ -22,6 +22,7 @@ def generate(
     output_dir: Path,
     base_url: str,
     workflow_json: Optional[str] = None,
+    session_id: str = "",
 ) -> str:
     """Build a workflow, submit it to ComfyUI, and return the saved image path."""
 
@@ -134,7 +135,12 @@ def generate(
     )
     view_resp.raise_for_status()
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    dest = output_dir / filename
+    image_id = uuid.uuid4().hex[:4]
+    ext = Path(filename).suffix or ".png"
+    short_id = session_id.split("-")[0] if session_id else ""
+    new_filename = f"{short_id}_{image_id}{ext}" if short_id else f"{image_id}{ext}"
+    dest_dir = (output_dir / short_id) if short_id else output_dir
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / new_filename
     dest.write_bytes(view_resp.content)
     return str(dest.resolve())
