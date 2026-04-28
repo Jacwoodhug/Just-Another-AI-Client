@@ -6,13 +6,70 @@ $backend = Join-Path $root "backend"
 
 Write-Host "=== Kokoro TTS setup ===" -ForegroundColor Cyan
 
-# Create .venv-kokoro if it doesn't exist
-$venv = Join-Path $backend ".venv-kokoro"
-if (!(Test-Path $venv)) {
-    Write-Host "Creating .venv-kokoro with Python 3.11 ..."
-    py -3.11 -m venv $venv
+$pythonVersion = "3.11.9"
+$venv        = Join-Path $backend ".venv-kokoro"
+$venvPython  = Join-Path $venv "Scripts\python.exe"
+# Base Python lives inside .venv-kokoro so there is only one folder to manage
+$baseDir     = Join-Path $venv ".base"
+$basePython  = Join-Path $baseDir "python.exe"
+
+# Check if .venv-kokoro exists and is working
+$needsRebuild = $false
+if (!(Test-Path $venvPython)) {
+    $needsRebuild = $true
 } else {
-    Write-Host ".venv-kokoro already exists, skipping creation."
+    & $venvPython --version 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { $needsRebuild = $true }
+}
+
+if ($needsRebuild) {
+    if (Test-Path $venv) {
+        Write-Host "Existing .venv-kokoro is broken, recreating ..." -ForegroundColor Yellow
+        Remove-Item -Recurse -Force $venv
+    }
+
+    # Download Python embeddable zip — no installer, no spaces-in-path issues
+    Write-Host "Downloading Python $pythonVersion embeddable package ..." -ForegroundColor Yellow
+    $zipUrl  = "https://www.python.org/ftp/python/$pythonVersion/python-$pythonVersion-embed-amd64.zip"
+    $zipPath = Join-Path $env:TEMP "python-$pythonVersion-embed-amd64.zip"
+    Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+
+    Write-Host "Extracting Python $pythonVersion to $baseDir ..."
+    New-Item -ItemType Directory -Force $baseDir | Out-Null
+    Expand-Archive -Path $zipPath -DestinationPath $baseDir -Force
+    Remove-Item $zipPath -Force
+
+    # Enable site-packages in the ._pth file (use .NET API to avoid BOM corruption)
+    $pthFile = Get-ChildItem $baseDir -Filter "*._pth" | Select-Object -First 1
+    if (!$pthFile) { throw "Could not find ._pth file in $baseDir" }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $pthContent = [System.IO.File]::ReadAllText($pthFile.FullName)
+    $pthContent = $pthContent -replace '#import site', 'import site'
+    [System.IO.File]::WriteAllText($pthFile.FullName, $pthContent, $utf8NoBom)
+
+    # Bootstrap pip onto the embeddable Python
+    Write-Host "Bootstrapping pip ..."
+    $getPipPath = Join-Path $env:TEMP "get-pip.py"
+    Invoke-WebRequest -Uri "https://bootstrap.pypa.io/get-pip.py" -OutFile $getPipPath -UseBasicParsing
+    & $basePython $getPipPath --no-warn-script-location
+    Remove-Item $getPipPath -Force
+
+    # Install virtualenv (embeddable has no venv module)
+    Write-Host "Installing virtualenv ..."
+    & $basePython -m pip install virtualenv --no-warn-script-location
+
+    # Create the actual venv using virtualenv
+    Write-Host "Creating .venv-kokoro ..."
+    & $basePython -m virtualenv $venv
+
+    if (!(Test-Path $venvPython)) {
+        Write-Host "ERROR: .venv-kokoro was not created successfully." -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host ".venv-kokoro created (base Python is self-contained inside .venv-kokoro\.base\)." -ForegroundColor Green
+} else {
+    Write-Host ".venv-kokoro already exists and works, skipping creation."
 }
 
 # Activate
