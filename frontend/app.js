@@ -67,9 +67,11 @@ const peCancelBtn = document.getElementById("peCancelBtn");
 const kokoroToggleBtn = document.getElementById("kokoroToggleBtn");
 const kokoroStatusDot = document.getElementById("kokoroStatusDot");
 const kokoroStatusText = document.getElementById("kokoroStatusText");
+const hdrKokoroDot = document.getElementById("hdrKokoroDot");
 const comfyuiToggleBtn = document.getElementById("comfyuiToggleBtn");
 const comfyuiStatusDot = document.getElementById("comfyuiStatusDot");
 const comfyuiStatusText = document.getElementById("comfyuiStatusText");
+const hdrComfyuiDot = document.getElementById("hdrComfyuiDot");
 const comfyuiCheckpointSelect = document.getElementById("comfyuiCheckpointSelect");
 const comfyuiRefreshModelsBtn = document.getElementById("comfyuiRefreshModelsBtn");
 const comfyuiModelSettingsForm = document.getElementById("comfyuiModelSettingsForm");
@@ -84,11 +86,13 @@ const comfyuiValidateWorkflowBtn = document.getElementById("comfyuiValidateWorkf
 const comfyuiValidateResult = document.getElementById("comfyuiValidateResult");
 const comfyuiSaveSettingsBtn = document.getElementById("comfyuiSaveSettingsBtn");
 const serviceToasts = document.getElementById("serviceToasts");
+const sessionScrim = document.getElementById("sessionScrim");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
 let recognition = null;
 let isListening = false;
+let isSessionPanelOpen = false;
 let sessionId = null;
 let pendingTranscript = "";
 let sendTimeoutId = null;
@@ -434,7 +438,7 @@ function touchSession(id) {
   saveSessions(sessions);
   if (
     sessionPanel &&
-    !layout.classList.contains("sessions-collapsed") &&
+    isSessionPanelOpen &&
     !editingSessionId
   ) {
     renderSessionList();
@@ -679,11 +683,15 @@ function deleteSession(id) {
 }
 
 function setSessionPanelOpen(open) {
-  if (!layout || !sessionPanel) {
+  if (!sessionPanel) {
     return;
   }
-  layout.classList.toggle("sessions-collapsed", !open);
+  isSessionPanelOpen = open;
+  sessionPanel.classList.toggle("open", open);
   sessionPanel.setAttribute("aria-hidden", String(!open));
+  if (sessionScrim) {
+    sessionScrim.classList.toggle("open", open);
+  }
   if (sessionToggle) {
     sessionToggle.classList.toggle("active", open);
     sessionToggle.setAttribute("aria-pressed", String(open));
@@ -889,6 +897,7 @@ async function startScreenCapture() {
   setScreenStatus("Screen: on");
   if (screenCaptureBtn) {
     screenCaptureBtn.textContent = "Disable screen";
+    screenCaptureBtn.classList.add("active");
   }
 }
 
@@ -901,6 +910,7 @@ function stopScreenCapture() {
   setScreenStatus("Screen: off");
   if (screenCaptureBtn) {
     screenCaptureBtn.textContent = "Enable screen";
+    screenCaptureBtn.classList.remove("active");
   }
 }
 
@@ -1139,10 +1149,10 @@ function resetIdleCaptureTimer() {
 }
 
 function setThinkingPanelOpen(open) {
-  if (!layout || !thinkingPanel) {
+  if (!thinkingPanel) {
     return;
   }
-  layout.classList.toggle("panel-collapsed", !open);
+  thinkingPanel.classList.toggle("open", open);
   thinkingPanel.setAttribute("aria-hidden", String(!open));
   if (thinkingToggle) {
     thinkingToggle.setAttribute("aria-pressed", String(open));
@@ -1315,6 +1325,8 @@ function setImagePreview(dataUrl) {
   img.src = dataUrl;
   img.alt = "Attached image preview";
   imagePreview.appendChild(img);
+  const area = document.getElementById("imagePreviewArea");
+  if (area) area.style.display = "flex";
 }
 
 function clearImage() {
@@ -1328,6 +1340,8 @@ function clearImage() {
   if (imageClearBtn) {
     imageClearBtn.disabled = true;
   }
+  const area = document.getElementById("imagePreviewArea");
+  if (area) area.style.display = "none";
 }
 
 function attachImageFile(file) {
@@ -1780,6 +1794,7 @@ async function sendTextNonStream(payload, shouldClearAttachment, sourceText) {
     addThinkingMessage("Assistant chose to stay silent.");
   }
 
+  setThinkingScreenshot("", "");
   updateThinkingPanel(toolCallsMade);
   updateThinkingTokenEstimate(data.context_debug || "");
   // Double requestAnimationFrame ensures scroll happens after layout is complete
@@ -2053,6 +2068,7 @@ async function sendText(text, options = {}) {
           const toolCalls = Array.isArray(message.tool_calls_made)
             ? message.tool_calls_made
             : [];
+          setThinkingScreenshot("", "");
           updateThinkingPanel(toolCalls);
           setThinkingContext(message.context_debug || "");
           setRawOutput(message.raw_output || "");
@@ -2130,31 +2146,26 @@ function initRecognition() {
 
   recognition.onstart = () => {
     setMic("Mic: listening");
-    startBtn.disabled = true;
-    stopBtn.disabled = false;
+    startBtn.classList.add("active");
+    startBtn.setAttribute("aria-pressed", "true");
   };
 
   recognition.onend = () => {
     setMic("Mic: idle");
     if (isListening) {
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      recognition.start();
+      try { recognition.start(); } catch (_) {}
     } else {
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
+      startBtn.classList.remove("active");
+      startBtn.setAttribute("aria-pressed", "false");
     }
   };
 
   recognition.onerror = () => {
     setMic("Mic: error");
-    if (isListening) {
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      return;
+    if (!isListening) {
+      startBtn.classList.remove("active");
+      startBtn.setAttribute("aria-pressed", "false");
     }
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
   };
 
   recognition.onresult = (event) => {
@@ -2361,7 +2372,10 @@ if (thinkingLoopToggle) {
   thinkingLoopToggle.addEventListener("click", () => {
     thinkingLoopEnabled = !thinkingLoopEnabled;
     thinkingLoopToggle.classList.toggle("off", !thinkingLoopEnabled);
+    thinkingLoopToggle.classList.toggle("active", thinkingLoopEnabled);
+    thinkingLoopToggle.setAttribute("aria-pressed", String(thinkingLoopEnabled));
     thinkingLoopToggle.textContent = `Thinking loop: ${thinkingLoopEnabled ? "on" : "off"}`;
+    localStorage.setItem("thinkingLoopEnabled", String(thinkingLoopEnabled));
   });
 }
 
@@ -2370,32 +2384,35 @@ startBtn.addEventListener("click", () => {
     return;
   }
   if (isListening) {
-    return;
-  }
-  isListening = true;
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  markSpeechActivity();
-  try {
-    recognition.start();
-  } catch (error) {
+    // Toggle off: stop listening
     isListening = false;
-    startBtn.disabled = false;
-    stopBtn.disabled = true;
+    recognition.stop();
+    startBtn.classList.remove("active");
+    startBtn.setAttribute("aria-pressed", "false");
+  } else {
+    // Toggle on: start listening
+    isListening = true;
+    startBtn.classList.add("active");
+    startBtn.setAttribute("aria-pressed", "true");
+    markSpeechActivity();
+    try {
+      recognition.start();
+    } catch (error) {
+      isListening = false;
+      startBtn.classList.remove("active");
+      startBtn.setAttribute("aria-pressed", "false");
+    }
   }
 });
 
 stopBtn.addEventListener("click", () => {
-  if (!recognition) {
-    return;
-  }
-  if (!isListening) {
+  if (!recognition || !isListening) {
     return;
   }
   isListening = false;
   recognition.stop();
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
+  startBtn.classList.remove("active");
+  startBtn.setAttribute("aria-pressed", "false");
 });
 
 newChatBtn.addEventListener("click", () => {
@@ -2404,8 +2421,7 @@ newChatBtn.addEventListener("click", () => {
 
 if (thinkingToggle) {
   thinkingToggle.addEventListener("click", () => {
-    const isOpen =
-      layout && !layout.classList.contains("panel-collapsed");
+    const isOpen = thinkingPanel && thinkingPanel.classList.contains("open");
     setThinkingPanelOpen(!isOpen);
   });
 }
@@ -2496,24 +2512,29 @@ function updateKokoroUI() {
   if (!kokoroToggleBtn || !kokoroStatusDot || !kokoroStatusText) return;
 
   kokoroStatusDot.classList.remove("running", "stopped", "unavailable");
+  hdrKokoroDot?.classList.remove("running", "stopped", "unavailable");
 
   if (!kokoroServiceAvailable) {
     kokoroStatusDot.classList.add("unavailable");
+    hdrKokoroDot?.classList.add("unavailable");
     kokoroStatusText.textContent = "Unavailable";
     kokoroToggleBtn.textContent = "Launch";
     kokoroToggleBtn.disabled = true;
   } else if (kokoroServiceBusy) {
     kokoroStatusDot.classList.add("stopped");
+    hdrKokoroDot?.classList.add("stopped");
     kokoroStatusText.textContent = kokoroServiceRunning ? "Stopping…" : "Starting…";
     kokoroToggleBtn.textContent = kokoroServiceRunning ? "Stop Service" : "Launch";
     kokoroToggleBtn.disabled = true;
   } else if (kokoroServiceRunning) {
     kokoroStatusDot.classList.add("running");
+    hdrKokoroDot?.classList.add("running");
     kokoroStatusText.textContent = "Running";
     kokoroToggleBtn.textContent = "Stop Service";
     kokoroToggleBtn.disabled = false;
   } else {
     kokoroStatusDot.classList.add("stopped");
+    hdrKokoroDot?.classList.add("stopped");
     kokoroStatusText.textContent = "Stopped";
     kokoroToggleBtn.textContent = "Launch";
     kokoroToggleBtn.disabled = false;
@@ -2582,24 +2603,29 @@ function updateComfyUIUI() {
   if (!comfyuiToggleBtn || !comfyuiStatusDot || !comfyuiStatusText) return;
 
   comfyuiStatusDot.classList.remove("running", "stopped", "unavailable");
+  hdrComfyuiDot?.classList.remove("running", "stopped", "unavailable");
 
   if (!comfyuiServiceAvailable) {
     comfyuiStatusDot.classList.add("unavailable");
+    hdrComfyuiDot?.classList.add("unavailable");
     comfyuiStatusText.textContent = "Unavailable";
     comfyuiToggleBtn.textContent = "Launch";
     comfyuiToggleBtn.disabled = true;
   } else if (comfyuiServiceBusy) {
     comfyuiStatusDot.classList.add("stopped");
+    hdrComfyuiDot?.classList.add("stopped");
     comfyuiStatusText.textContent = comfyuiServiceRunning ? "Stopping…" : "Starting…";
     comfyuiToggleBtn.textContent = comfyuiServiceRunning ? "Stop Service" : "Launch";
     comfyuiToggleBtn.disabled = true;
   } else if (comfyuiServiceRunning) {
     comfyuiStatusDot.classList.add("running");
+    hdrComfyuiDot?.classList.add("running");
     comfyuiStatusText.textContent = "Running";
     comfyuiToggleBtn.textContent = "Stop Service";
     comfyuiToggleBtn.disabled = false;
   } else {
     comfyuiStatusDot.classList.add("stopped");
+    hdrComfyuiDot?.classList.add("stopped");
     comfyuiStatusText.textContent = "Stopped";
     comfyuiToggleBtn.textContent = "Launch";
     comfyuiToggleBtn.disabled = false;
@@ -3256,10 +3282,12 @@ if (personalityPickerCreate) {
 
 if (sessionToggle) {
   sessionToggle.addEventListener("click", () => {
-    const isOpen =
-      layout && !layout.classList.contains("sessions-collapsed");
-    setSessionPanelOpen(!isOpen);
+    setSessionPanelOpen(!isSessionPanelOpen);
   });
+}
+
+if (sessionScrim) {
+  sessionScrim.addEventListener("click", () => setSessionPanelOpen(false));
 }
 
 if (sessionClose) {
@@ -3669,9 +3697,51 @@ startIdleWatcher();
 loadChatHistory();
 const storedTts = localStorage.getItem("ttsEnabled");
 setTtsEnabled(storedTts !== "false");
-if (sessionPanel && !layout.classList.contains("sessions-collapsed")) {
+const storedThinkingLoop = localStorage.getItem("thinkingLoopEnabled");
+if (storedThinkingLoop === "false") {
+  thinkingLoopEnabled = false;
+  if (thinkingLoopToggle) {
+    thinkingLoopToggle.classList.remove("active");
+    thinkingLoopToggle.classList.add("off");
+    thinkingLoopToggle.setAttribute("aria-pressed", "false");
+    thinkingLoopToggle.textContent = "Thinking loop: off";
+  }
+}
+if (sessionPanel && isSessionPanelOpen) {
   renderSessionList();
 }
+
+// Settings tab switching
+(function initSettingsTabs() {
+  const tabs = document.querySelectorAll(".settings-tab[data-settings-tab]");
+  const panes = document.querySelectorAll(".settings-pane[data-settings-pane]");
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.settingsTab;
+      tabs.forEach(t => {
+        t.classList.toggle("active", t.dataset.settingsTab === target);
+        t.setAttribute("aria-selected", String(t.dataset.settingsTab === target));
+      });
+      panes.forEach(p => { p.hidden = p.dataset.settingsPane !== target; });
+    });
+  });
+})();
+
+// Workspace tab switching
+(function initWorkspaceTabs() {
+  const tabs = document.querySelectorAll(".workspace-tab[data-workspace]");
+  const workspaces = document.querySelectorAll(".workspace[data-workspace]");
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => {
+      const target = tab.dataset.workspace;
+      tabs.forEach(t => {
+        t.classList.toggle("active", t.dataset.workspace === target);
+        t.setAttribute("aria-pressed", String(t.dataset.workspace === target));
+      });
+      workspaces.forEach(w => { w.hidden = w.dataset.workspace !== target; });
+    });
+  });
+})();
 
 // Interval controls
 const thinkingIntervalInput = document.getElementById("thinkingIntervalInput");
@@ -3745,6 +3815,7 @@ async function updateVramIndicator() {
 }
 
 updateVramIndicator();
+setInterval(updateVramIndicator, 5000);
 
 // ---------------------------------------------------------------------------
 // Image lightbox
@@ -3979,44 +4050,7 @@ updateVramIndicator();
   });
 }());
 
-// Chat resize
-(function () {
-  const handle = document.getElementById('chatResizeHandle');
-  const STORAGE_KEY = 'chatLogHeight';
-  const MIN_H = 120;
-
-  const saved = parseInt(localStorage.getItem(STORAGE_KEY), 10);
-  if (saved >= MIN_H) chatLog.style.maxHeight = saved + 'px';
-
-  let dragging = false;
-  let startY = 0;
-  let startH = 0;
-
-  handle.addEventListener('mousedown', e => {
-    dragging = true;
-    startY = e.clientY;
-    startH = chatLog.getBoundingClientRect().height;
-    handle.classList.add('dragging');
-    document.body.style.cursor = 'ns-resize';
-    document.body.style.userSelect = 'none';
-    e.preventDefault();
-  });
-
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const newH = Math.max(MIN_H, startH + (e.clientY - startY));
-    chatLog.style.maxHeight = newH + 'px';
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    handle.classList.remove('dragging');
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-    localStorage.setItem(STORAGE_KEY, parseInt(chatLog.style.maxHeight, 10));
-  });
-}());
+localStorage.removeItem('chatLogHeight');
 setInterval(updateVramIndicator, 5000);
 
 // ---------------------------------------------------------------------------

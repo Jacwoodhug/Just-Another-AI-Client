@@ -1,36 +1,100 @@
 <!doctype html>
 <html lang="en">
-
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Ollama Voice Chat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Grotesk:wght@400;500;600&display=swap"
-    rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-
 <body>
   <div class="grain"></div>
-  <button class="burger" id="sessionToggle" type="button" aria-label="Sessions">
-    <span></span>
-    <span></span>
-    <span></span>
-  </button>
-  <button class="thinking-fab" id="thinkingToggle" type="button" aria-label="Thinking">Open Thinking</button>
-  <div class="layout" id="layout">
-    <aside class="session-panel" id="sessionPanel" aria-hidden="true">
-      <div class="session-header">
-        <h3>Sessions</h3>
-        <button class="ghost" id="sessionClose" type="button" aria-label="Close">✕</button>
+
+  <!-- ── Fixed header ──────────────────────────────────────────────────── -->
+  <header class="app-header" id="appHeader">
+    <!-- Hamburger / sessions toggle -->
+    <button class="hdr-icon-btn" id="sessionToggle" type="button" aria-label="Sessions" title="Sessions" aria-pressed="false">
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none">
+        <rect y="0"  width="16" height="1.8" rx="1" fill="currentColor"/>
+        <rect y="5"  width="11" height="1.8" rx="1" fill="currentColor"/>
+        <rect y="10" width="16" height="1.8" rx="1" fill="currentColor"/>
+      </svg>
+    </button>
+
+    <!-- Workspace tabs -->
+    <nav class="workspace-tabs" aria-label="Workspaces">
+      <button class="workspace-tab active" data-workspace="chat" type="button" aria-pressed="true">Chat</button>
+      <button class="workspace-tab" data-workspace="code" type="button" aria-pressed="false">Code</button>
+      <button class="workspace-tab" data-workspace="image" type="button" aria-pressed="false">Image</button>
+    </nav>
+
+    <div class="hdr-spacer"></div>
+
+    <!-- Service indicators -->
+    <div class="hdr-svc-pill" id="hdrKokoroPill" title="AI TTS service">
+      <span class="kokoro-status-dot" id="hdrKokoroDot"></span>
+      <span class="hdr-svc-label">AITTS</span>
+    </div>
+    <div class="hdr-svc-pill" id="hdrComfyuiPill" title="Image Generation service">
+      <span class="comfyui-status-dot" id="hdrComfyuiDot"></span>
+      <span class="hdr-svc-label">ImageGen</span>
+    </div>
+
+    <!-- Model selector -->
+    <label class="hdr-pill" title="Language model">
+      <span class="hdr-pill-label">Model</span>
+      <select id="modelSelect" class="hdr-select"></select>
+    </label>
+
+    <!-- Provider toggle (Local / API) -->
+    <div class="seg-control" id="providerToggle" role="group" aria-label="Model provider">
+      <button class="seg-btn" type="button" data-provider="ollama" aria-pressed="true">Local</button>
+      <button class="seg-btn" type="button" data-provider="openrouter" aria-pressed="false">API</button>
+    </div>
+
+    <!-- Persona selector -->
+    <label class="hdr-pill" title="Active personality">
+      <span class="hdr-pill-label">Persona</span>
+      <select id="personalitySelect" class="hdr-select"></select>
+    </label>
+
+    <!-- Thinking panel toggle -->
+    <button class="thinking-toggle" id="thinkingToggle" type="button" title="Toggle thinking panel" aria-pressed="false">
+      <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+        <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" stroke-width="1.3"/>
+        <path d="M4.5 5C4.5 3.89 5.395 3 6.5 3s2 .89 2 2c0 .9-.5 1.65-1.25 2.05V8.5h-1.5V7.05C5 6.65 4.5 5.9 4.5 5Z" fill="currentColor"/>
+        <circle cx="6.5" cy="10.2" r="0.65" fill="currentColor"/>
+      </svg>
+      Thinking
+    </button>
+
+    <!-- Settings -->
+    <button class="hdr-icon-btn" id="settingsBtn" type="button" aria-label="Settings" title="Settings">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- ── App body ───────────────────────────────────────────────────────── -->
+  <div class="app-body" id="layout">
+
+    <!-- Sessions scrim (backdrop when drawer is open) -->
+    <div class="session-scrim" id="sessionScrim"></div>
+
+    <!-- Sessions drawer (overlay) -->
+    <aside class="session-drawer" id="sessionPanel" aria-hidden="true" aria-label="Sessions">
+      <div class="session-drawer-header">
+        <span class="session-drawer-title">Sessions</span>
+        <button class="ghost-btn" id="sessionClose" type="button" aria-label="Close sessions">✕</button>
       </div>
       <div class="session-actions">
-        <button class="small" id="sessionNewBtn" type="button">New session</button>
-        <button class="small ghost" id="sessionNewPersonalityBtn" type="button">Personality session</button>
+        <button class="primary small" id="sessionNewBtn" type="button">+ New session</button>
+        <button class="ghost small" id="sessionNewPersonalityBtn" type="button">Personality</button>
       </div>
-
       <!-- Personality session picker -->
       <div class="personality-picker" id="personalityPicker" hidden>
         <label class="personality-picker-label">Lock to personality</label>
@@ -40,312 +104,373 @@
           <button class="ghost small" id="personalityPickerCancel" type="button">Cancel</button>
         </div>
       </div>
+      <!-- Session list -->
       <div class="session-list" id="sessionList">
         <div class="session-empty">No sessions yet.</div>
       </div>
     </aside>
-    <main class="shell">
-      <header class="brand">
-        <div class="title">AI Voice Chat</div>
-      </header>
 
-      <section class="status">
-        <div class="status-row status-top">
-          <div class="status-left">
-            <div class="pill" id="sessionStatus">Session: new</div>
-            <div class="pill mic-pill" id="micStatus">Mic: idle</div>
-          </div>
-        </div>
-        <div class="status-row">
-          <div class="pill provider-pill" role="group" aria-label="Model source">
-            <span>Source</span>
-            <div class="provider-toggle" id="providerToggle">
-              <button class="provider-option" type="button" data-provider="ollama" aria-pressed="true">Local</button>
-              <button class="provider-option" type="button" data-provider="openrouter" aria-pressed="false">API</button>
-            </div>
-          </div>
-          <label class="pill model-pill">
-            <span>Model</span>
-            <select id="modelSelect"></select>
-          </label>
-          <label class="pill personality-pill">
-            <span>Personality</span>
-            <select id="personalitySelect"></select>
-          </label>
-        </div>
-        <div class="status-row">
-          <button class="pill toggle tts-toggle" id="ttsToggle" type="button">TTS: on</button>
-          <button class="pill toggle" id="ttsProviderToggle" type="button">TTS: Browser</button>
-          <label class="pill voice-pill">
-            <span>Voice</span>
-            <select id="voiceSelect"></select>
-          </label>
-          <button class="small" id="voiceTestBtn" type="button">Test voice</button>
-        </div>
-      </section>
+    <!-- ── Main workspace area ──────────────────────────────────────────── -->
+    <main class="workspace-area" id="workspaceArea">
 
-      <section class="panel">
-        <div class="panel-header">
-          <h2>Live Transcript</h2>
-          <div class="panel-meta">
-            <div class="model" id="modelStatus">Model: loading</div>
-            <div class="provider-badge" id="providerBadge">Provider: Local</div>
-          </div>
-        </div>
-        <div class="chat" id="chatLog"></div>
-        <div class="interim">
-          <span class="label">Listening</span>
-          <span id="interimText">...</span>
-        </div>
-        <div class="chat-resize-handle" id="chatResizeHandle" title="Drag to resize chat"></div>
-      </section>
+      <!-- Chat workspace (default visible) -->
+      <div class="workspace" id="chatWorkspace" data-workspace="chat">
+        <!-- Chat log -->
+        <div class="chat-log" id="chatLog"></div>
 
-      <section class="controls">
-        <button class="primary" id="startBtn">Start mic</button>
-        <button id="stopBtn">Stop mic</button>
-        <button id="newChatBtn">New chat</button>
-      </section>
-
-      <section class="composer">
-        <div class="composer-input-wrap">
-          <div class="slash-menu" id="slashMenu" hidden>
+        <!-- Composer -->
+        <div class="composer">
+          <!-- Slash command menu -->
+          <div class="slash-menu" id="slashMenu" hidden role="listbox" aria-label="Slash commands">
             <ul class="slash-list" id="slashList"></ul>
           </div>
-          <input id="textInput" type="text" placeholder="Type a message if you prefer" autocomplete="off" />
-        </div>
-        <button class="primary" id="sendBtn">Send</button>
-      </section>
 
-      <section class="attachments">
+          <!-- Main input row -->
+          <div class="composer-main-row">
+            <button class="composer-mic" id="startBtn" type="button"
+              aria-label="Toggle microphone" aria-pressed="false" title="Toggle microphone">
+              <svg width="13" height="16" viewBox="0 0 13 16" fill="none">
+                <rect x="3.5" y="0.5" width="6" height="9" rx="3" stroke="currentColor" stroke-width="1.4"/>
+                <path d="M1 8c0 3.03 2.46 5.5 5.5 5.5S12 11.03 12 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                <line x1="6.5" y1="13.5" x2="6.5" y2="15.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+              </svg>
+            </button>
+
+            <input class="composer-input" id="textInput" type="text"
+              placeholder="Type a message…" autocomplete="off" />
+
+            <button class="hdr-icon-btn composer-attach" id="imageUploadBtn" type="button"
+              title="Attach image" aria-label="Attach image">
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+                <path d="M12.5 8L7 13.5a3.9 3.9 0 01-5.5-5.5L7 2.5a2.6 2.6 0 013.67 3.67L5.5 11.5A1.3 1.3 0 013.67 9.67L8.5 4.5"
+                  stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+
+            <button class="composer-send primary" id="sendBtn" type="button">Send</button>
+          </div>
+
+          <!-- Secondary chip strip -->
+          <div class="composer-chips">
+            <button class="composer-chip" id="screenCaptureBtn" type="button">Enable screen</button>
+            <button class="composer-chip" id="idleCaptureToggle" type="button" aria-pressed="false">Idle capture: off</button>
+            <button class="composer-chip active" id="thinkingLoopToggle" type="button" aria-pressed="true">Thinking loop: on</button>
+            <button class="composer-chip active" id="ttsToggle" type="button" aria-pressed="true">TTS: on</button>
+            <div class="composer-chip-divider"></div>
+            <button class="ghost-btn" id="newChatBtn" type="button" style="font-size:12px;padding:3px 10px;">New chat</button>
+          </div>
+
+          <!-- Image preview row (shown when image attached) -->
+          <div class="composer-image-area" id="imagePreviewArea" style="display:none">
+            <div class="image-preview" id="imagePreview">
+              <span class="image-placeholder">No image attached.</span>
+            </div>
+            <button class="ghost small" id="imageClearBtn" type="button" disabled>Clear</button>
+          </div>
+        </div>
+
+        <!-- Hidden elements kept for app.js compatibility -->
         <input id="imageInput" type="file" accept="image/*" hidden />
-        <div class="attachment-actions">
-          <button id="imageUploadBtn" type="button">Upload image</button>
-          <button id="imageClearBtn" type="button" disabled>Clear image</button>
-          <span class="attachment-hint">Paste an image to attach.</span>
-        </div>
-        <div class="capture-actions">
-          <div class="pill" id="screenStatus">Screen: off</div>
-          <button id="screenCaptureBtn" type="button">Enable screen</button>
-          <button class="pill toggle" id="idleCaptureToggle" type="button">Idle capture: off</button>
-          <button class="pill toggle" id="thinkingLoopToggle" type="button">Thinking loop: on</button>
-        </div>
-        <div class="capture-actions">
-          <label class="pill">
-            <span>Thinking interval (s)</span>
-            <input id="thinkingIntervalInput" type="number" min="5" max="300" value="30" style="width: 80px;" />
-          </label>
-          <label class="pill">
-            <span>Screenshot interval (s)</span>
-            <input id="screenshotIntervalInput" type="number" min="10" max="600" value="60" style="width: 80px;" />
-          </label>
-          <span class="attachment-hint">Adjust auto-capture timing.</span>
-        </div>
-        <div class="image-preview" id="imagePreview">
-          <span class="image-placeholder">No image attached.</span>
-        </div>
-      </section>
-    </main>
+        <button id="stopBtn" type="button" hidden></button>
+        <div id="interimText" hidden></div>
+        <div id="screenStatus" hidden></div>
+        <div id="micStatus" hidden></div>
+        <div id="sessionStatus" hidden></div>
+        <div id="modelStatus" hidden></div>
+        <div id="providerBadge" hidden></div>
+      </div><!-- /chatWorkspace -->
 
-    <aside class="thinking-panel" id="thinkingPanel" aria-hidden="true">
-      <div class="thinking-header">
-        <h3>Thinking</h3>
-        <button class="ghost" id="thinkingClose" type="button" aria-label="Close">✕</button>
+      <!-- Code workspace (placeholder) -->
+      <div class="workspace" id="codeWorkspace" data-workspace="code" hidden
+        style="align-items:center;justify-content:center;gap:10px">
+        <span style="font-size:14px;color:var(--muted)">Code workspace</span>
+        <span style="font-size:12px;color:rgba(184,168,143,0.45)">Coming soon</span>
       </div>
-      <div class="thinking-section">
-        <h4>Tools used</h4>
-        <ul id="thinkingToolCalls"></ul>
+
+      <!-- Image workspace (placeholder) -->
+      <div class="workspace" id="imageWorkspace" data-workspace="image" hidden
+        style="align-items:center;justify-content:center;gap:10px">
+        <span style="font-size:14px;color:var(--muted)">Image workspace</span>
+        <span style="font-size:12px;color:rgba(184,168,143,0.45)">ComfyUI integration coming soon</span>
       </div>
-      <div class="thinking-section">
-        <h4>Screenshot</h4>
-        <div class="thinking-screenshot" id="thinkingScreenshot" hidden></div>
-      </div>
-      <div class="thinking-section">
-        <h4>Silent response</h4>
-        <div class="thinking-chat" id="thinkingSilentList">
-          <div class="thinking-empty">No silent response yet.</div>
+
+    </main><!-- /workspaceArea -->
+
+    <!-- ── Thinking panel (right, animated width) ───────────────────────── -->
+    <aside class="thinking-panel" id="thinkingPanel" aria-hidden="true" aria-label="Thinking panel">
+      <div class="thinking-panel-inner">
+        <div class="thinking-panel-header">
+          <span class="thinking-panel-title">Thinking</span>
         </div>
-      </div>
-      <div class="thinking-section">
-        <h4>Full context</h4>
-        <button class="ghost small" id="contextToggle" type="button">Show full context</button>
-        <pre id="thinkingContext" class="thinking-context" hidden></pre>
-      </div>
-      <div class="thinking-section">
-        <h4>Raw output</h4>
-        <button class="ghost small" id="rawOutputToggle" type="button">Show raw output</button>
-        <pre id="thinkingRawOutput" class="thinking-context" hidden></pre>
-      </div>
-      <div class="thinking-footer">
-        <span id="thinkingVram" class="thinking-vram" title="GPU VRAM usage">
-          <svg class="vram-pie" id="thinkingVramPie" viewBox="0 0 20 20">
-            <circle class="vram-pie-bg" cx="10" cy="10" r="8"/>
-            <circle class="vram-pie-fill" id="thinkingVramArc" cx="10" cy="10" r="8"
-              stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/>
-          </svg>
-          <span id="thinkingVramLabel">VRAM —</span>
-        </span>
-        <span id="thinkingTokenEstimate">~0 tokens</span>
+
+        <div class="thinking-panel-body">
+          <div class="think-section">
+            <div class="think-section-label">Tools used</div>
+            <ul id="thinkingToolCalls"></ul>
+          </div>
+
+          <div class="think-section">
+            <div class="think-section-label">Screenshot</div>
+            <div class="thinking-screenshot" id="thinkingScreenshot" hidden></div>
+          </div>
+
+          <div class="think-section">
+            <div class="think-section-label">Silent response</div>
+            <div class="thinking-chat" id="thinkingSilentList">
+              <div class="thinking-empty">No silent response yet.</div>
+            </div>
+          </div>
+
+          <div class="think-section">
+            <div class="think-section-label">Full context</div>
+            <button class="think-toggle-btn" id="contextToggle" type="button" disabled>Show full context</button>
+            <pre id="thinkingContext" class="thinking-context" hidden></pre>
+          </div>
+
+          <div class="think-section">
+            <div class="think-section-label">Raw output</div>
+            <button class="think-toggle-btn" id="rawOutputToggle" type="button" disabled>Show raw output</button>
+            <pre id="thinkingRawOutput" class="thinking-context" hidden></pre>
+          </div>
+        </div>
+
+        <div class="thinking-panel-footer">
+          <span class="thinking-vram" id="thinkingVram">
+            <svg class="vram-pie" id="thinkingVramPie" viewBox="0 0 20 20">
+              <circle class="vram-pie-bg" cx="10" cy="10" r="8"/>
+              <circle class="vram-pie-fill" id="thinkingVramArc" cx="10" cy="10" r="8"
+                stroke-dasharray="0 50.27" transform="rotate(-90 10 10)"/>
+            </svg>
+            <span id="thinkingVramLabel">VRAM —</span>
+          </span>
+          <span id="thinkingTokenEstimate">~0 tokens</span>
+        </div>
       </div>
     </aside>
-  </div>
 
-  <!-- Context menu -->
+  </div><!-- /app-body -->
+
+  <!-- ── Context menu ──────────────────────────────────────────────────── -->
   <div class="ctx-menu" id="ctxMenu" hidden role="menu" aria-label="Message actions"></div>
 
-  <!-- Settings modal -->
+  <!-- ── Settings modal ────────────────────────────────────────────────── -->
   <div class="modal-backdrop" id="settingsBackdrop" hidden>
     <div class="modal" id="settingsModal" role="dialog" aria-modal="true" aria-label="Settings">
       <div class="modal-header">
-        <h3>Settings</h3>
-        <button class="ghost" id="settingsClose" type="button">Close</button>
+        <span class="modal-title">Settings</span>
+        <button class="ghost-btn" id="settingsClose" type="button" aria-label="Close settings">✕</button>
       </div>
+
+      <!-- Tab nav -->
+      <div class="settings-tabs" role="tablist">
+        <button class="settings-tab active" data-settings-tab="model" type="button" role="tab" aria-selected="true">Model</button>
+        <button class="settings-tab" data-settings-tab="voice" type="button" role="tab" aria-selected="false">Voice</button>
+        <button class="settings-tab" data-settings-tab="context" type="button" role="tab" aria-selected="false">Context</button>
+        <button class="settings-tab" data-settings-tab="services" type="button" role="tab" aria-selected="false">Services</button>
+      </div>
+
+      <!-- Settings main area (tabbed panes) -->
       <div class="modal-body" id="settingsMain">
-        <div class="setting-row">
-          <label class="setting-label">Search Method</label>
-          <div class="setting-toggle" id="searchMethodToggle" role="group" aria-label="Search method">
-            <button class="setting-option" type="button" data-value="searxng">SearXNG</button>
-            <button class="setting-option" type="button" data-value="brave">Brave</button>
-            <button class="setting-option" type="button" data-value="none">None</button>
-          </div>
-        </div>
-        <div class="setting-row">
-          <label class="setting-label" for="chatMaxHistoryInput">Max History Messages</label>
-          <input type="number" id="chatMaxHistoryInput" min="1" max="200" value="20" style="width:80px;text-align:right">
-        </div>
-        <div class="setting-row">
-          <label class="setting-label" for="contextMaxTokensInput">Max Context Tokens</label>
-          <div style="display:flex;align-items:center;gap:5px">
-            <input type="number" id="contextMaxTokensInput" min="1" max="128" step="1" value="4" style="width:80px;text-align:right">
-            <span style="font-size:15px;color:var(--ink);font-weight:600">k</span>
-          </div>
-        </div>
-        <div class="setting-row">
-          <label class="setting-label" for="ragTopKInput">Max RAG Results</label>
-          <input type="number" id="ragTopKInput" min="0" max="20" value="4" style="width:80px;text-align:right">
-        </div>
-        <div class="setting-section">
+
+        <!-- MODEL pane -->
+        <div class="settings-pane" data-settings-pane="model">
+          <div class="settings-section-title">Personalities</div>
           <div class="setting-section-header">
-            <span class="setting-label">Personalities</span>
+            <span class="setting-label" style="color:var(--muted);font-size:12px">Manage AI personalities</span>
             <button class="small" id="personalityAddBtn" type="button">Add</button>
           </div>
           <div id="personalityList"></div>
         </div>
-        <div class="setting-section">
+
+        <!-- VOICE pane (hidden initially) -->
+        <div class="settings-pane" data-settings-pane="voice" hidden>
+          <div class="settings-section-title">Text-to-Speech</div>
           <div class="setting-row">
-            <label class="setting-label">
-              Kokoro TTS Service
-              <span class="kokoro-status-dot" id="kokoroStatusDot"></span>
-              <span class="kokoro-status-text" id="kokoroStatusText">Checking…</span>
-            </label>
-            <button class="small" id="kokoroToggleBtn" type="button" disabled>Launch</button>
+            <label class="setting-label">TTS Provider</label>
+            <button class="small" id="ttsProviderToggle" type="button">TTS: Browser</button>
+          </div>
+          <!-- voice-pill: hidden when TTS is disabled (via setTtsEnabled) -->
+          <div class="voice-pill">
+            <div class="setting-row">
+              <label class="setting-label" for="voiceSelect">Voice</label>
+              <select id="voiceSelect" style="flex:2;max-width:220px"></select>
+            </div>
+            <div class="setting-row">
+              <span></span>
+              <button class="small" id="voiceTestBtn" type="button">Test voice</button>
+            </div>
           </div>
         </div>
-        <div class="setting-section">
+
+        <!-- CONTEXT pane (hidden initially) -->
+        <div class="settings-pane" data-settings-pane="context" hidden>
+          <div class="settings-section-title">Context &amp; Memory</div>
           <div class="setting-row">
-            <label class="setting-label">
-              ComfyUI Image Service
-              <span class="comfyui-status-dot" id="comfyuiStatusDot"></span>
-              <span class="kokoro-status-text" id="comfyuiStatusText">Checking…</span>
-            </label>
-            <button class="small" id="comfyuiToggleBtn" type="button" disabled>Launch</button>
+            <label class="setting-label">Search Method</label>
+            <div class="setting-toggle" id="searchMethodToggle" role="group" aria-label="Search method">
+              <button class="setting-option" type="button" data-value="searxng">SearXNG</button>
+              <button class="setting-option" type="button" data-value="brave">Brave</button>
+              <button class="setting-option" type="button" data-value="none">None</button>
+            </div>
           </div>
-          <div class="setting-row" style="margin-top:10px">
-            <label class="setting-label" style="flex:1">Checkpoint</label>
-            <select id="comfyuiCheckpointSelect"></select>
-            <button class="small" id="comfyuiRefreshModelsBtn" type="button">↻</button>
+          <div class="setting-row">
+            <label class="setting-label" for="chatMaxHistoryInput">Max History Messages</label>
+            <input type="number" id="chatMaxHistoryInput" min="1" max="200" value="20"
+              style="width:80px;text-align:right">
           </div>
-          <div id="comfyuiModelSettingsForm" style="margin-top:10px;display:none">
-            <div class="setting-row">
-              <label class="setting-label" style="flex:1">Steps</label>
-              <input type="number" id="comfyuiStepsInput" min="1" max="150" value="20" style="flex:2">
+          <div class="setting-row">
+            <label class="setting-label" for="contextMaxTokensInput">Max Context Tokens</label>
+            <div style="display:flex;align-items:center;gap:5px">
+              <input type="number" id="contextMaxTokensInput" min="1" max="128" step="1" value="4"
+                style="width:80px;text-align:right">
+              <span style="color:var(--ink);font-size:14px;font-weight:600">k</span>
             </div>
-            <div class="setting-row">
-              <label class="setting-label" style="flex:1">CFG Scale</label>
-              <input type="number" id="comfyuiCfgInput" min="1" max="30" step="0.5" value="7" style="flex:2">
-            </div>
-            <div class="setting-row" style="margin-top:2px">
-              <label class="setting-label" style="flex:1">Sampler</label>
-              <select id="comfyuiSamplerInput" style="flex:2">
-                <option value="euler">euler</option>
-                <option value="euler_cfg_pp">euler_cfg_pp</option>
-                <option value="euler_ancestral">euler_ancestral</option>
-                <option value="euler_ancestral_cfg_pp">euler_ancestral_cfg_pp</option>
-                <option value="heun">heun</option>
-                <option value="heun2">heun2</option>
-                <option value="dpm_2">dpm_2</option>
-                <option value="dpm_2_ancestral">dpm_2_ancestral</option>
-                <option value="lms">lms</option>
-                <option value="dpm_fast">dpm_fast</option>
-                <option value="dpm_adaptive">dpm_adaptive</option>
-                <option value="dpmpp_2s_ancestral">dpmpp_2s_ancestral</option>
-                <option value="dpmpp_sde">dpmpp_sde</option>
-                <option value="dpmpp_sde_gpu">dpmpp_sde_gpu</option>
-                <option value="dpmpp_2m">dpmpp_2m</option>
-                <option value="dpmpp_2m_cfg_pp">dpmpp_2m_cfg_pp</option>
-                <option value="dpmpp_2m_sde">dpmpp_2m_sde</option>
-                <option value="dpmpp_2m_sde_gpu">dpmpp_2m_sde_gpu</option>
-                <option value="dpmpp_3m_sde">dpmpp_3m_sde</option>
-                <option value="dpmpp_3m_sde_gpu">dpmpp_3m_sde_gpu</option>
-                <option value="ddpm">ddpm</option>
-                <option value="lcm">lcm</option>
-                <option value="ipndm">ipndm</option>
-                <option value="ipndm_v">ipndm_v</option>
-                <option value="deis">deis</option>
-                <option value="ddim">ddim</option>
-                <option value="uni_pc">uni_pc</option>
-                <option value="uni_pc_bh2">uni_pc_bh2</option>
-              </select>
-            </div>
-            <div class="setting-row" style="margin-top:2px">
-              <label class="setting-label" style="flex:1">Scheduler</label>
-              <select id="comfyuiSchedulerInput" style="flex:2">
-                <option value="normal">normal</option>
-                <option value="karras">karras</option>
-                <option value="exponential">exponential</option>
-                <option value="sgm_uniform">sgm_uniform</option>
-                <option value="simple">simple</option>
-                <option value="ddim_uniform">ddim_uniform</option>
-                <option value="beta">beta</option>
-                <option value="linear_quadratic">linear_quadratic</option>
-                <option value="kl_optimal">kl_optimal</option>
-              </select>
-            </div>
-            <div class="setting-row" style="align-items:flex-start">
-              <label class="setting-label" style="flex:1;padding-top:4px">Resolutions</label>
-              <div style="flex:2">
-                <div id="comfyuiResolutionList"></div>
-                <button class="small" id="comfyuiAddResolutionBtn" type="button" style="margin-top:4px">+ Add</button>
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" for="ragTopKInput">Max RAG Results</label>
+            <input type="number" id="ragTopKInput" min="0" max="20" value="4"
+              style="width:80px;text-align:right">
+          </div>
+          <div class="settings-section-title" style="margin-top:6px">Capture Timing</div>
+          <div class="setting-row">
+            <label class="setting-label" for="thinkingIntervalInput">Thinking interval (s)</label>
+            <input id="thinkingIntervalInput" type="number" min="5" max="300" value="30"
+              style="width:80px;text-align:right" />
+          </div>
+          <div class="setting-row">
+            <label class="setting-label" for="screenshotIntervalInput">Screenshot interval (s)</label>
+            <input id="screenshotIntervalInput" type="number" min="10" max="600" value="60"
+              style="width:80px;text-align:right" />
+          </div>
+        </div>
+
+        <!-- SERVICES pane (hidden initially) -->
+        <div class="settings-pane" data-settings-pane="services" hidden>
+          <div class="settings-section-title">Services</div>
+
+          <!-- Kokoro TTS -->
+          <div class="service-card">
+            <div class="service-card-header">
+              <div class="service-card-status">
+                <span class="kokoro-status-dot" id="kokoroStatusDot"></span>
+                <span class="service-card-name">Kokoro TTS</span>
+                <span class="kokoro-status-text" id="kokoroStatusText">Checking…</span>
               </div>
+              <button class="small" id="kokoroToggleBtn" type="button" disabled>Launch</button>
             </div>
-            <details style="margin-top:12px">
-              <summary style="cursor:pointer;font-size:13px;color:var(--muted)">Custom Workflow JSON (Advanced)</summary>
-              <div style="margin-top:8px">
-                <textarea id="comfyuiWorkflowJsonTextarea" rows="8"
-                  placeholder='Paste ComfyUI API-format workflow JSON here. Use __PROMPT__ and __NEGATIVE_PROMPT__ as placeholders.'
-                  style="width:100%;font-size:11px;font-family:monospace;resize:vertical;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px"></textarea>
-                <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
-                  <button class="small" id="comfyuiValidateWorkflowBtn" type="button">Validate</button>
-                  <span id="comfyuiValidateResult" style="font-size:12px;color:var(--muted)"></span>
+          </div>
+
+          <!-- ComfyUI -->
+          <div class="service-card">
+            <div class="service-card-header">
+              <div class="service-card-status">
+                <span class="comfyui-status-dot" id="comfyuiStatusDot"></span>
+                <span class="service-card-name">ComfyUI Image</span>
+                <span class="kokoro-status-text" id="comfyuiStatusText">Checking…</span>
+              </div>
+              <button class="small" id="comfyuiToggleBtn" type="button" disabled>Launch</button>
+            </div>
+            <div class="setting-row" style="margin-top:10px">
+              <label class="setting-label" style="flex:1">Checkpoint</label>
+              <select id="comfyuiCheckpointSelect"></select>
+              <button class="small" id="comfyuiRefreshModelsBtn" type="button">↻</button>
+            </div>
+            <div id="comfyuiModelSettingsForm" style="margin-top:10px;display:none">
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">Steps</label>
+                <input type="number" id="comfyuiStepsInput" min="1" max="150" value="20" style="flex:2">
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">CFG Scale</label>
+                <input type="number" id="comfyuiCfgInput" min="1" max="30" step="0.5" value="7" style="flex:2">
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">Sampler</label>
+                <select id="comfyuiSamplerInput" style="flex:2">
+                  <option value="euler">euler</option>
+                  <option value="euler_cfg_pp">euler_cfg_pp</option>
+                  <option value="euler_ancestral">euler_ancestral</option>
+                  <option value="euler_ancestral_cfg_pp">euler_ancestral_cfg_pp</option>
+                  <option value="heun">heun</option>
+                  <option value="heun2">heun2</option>
+                  <option value="dpm_2">dpm_2</option>
+                  <option value="dpm_2_ancestral">dpm_2_ancestral</option>
+                  <option value="lms">lms</option>
+                  <option value="dpm_fast">dpm_fast</option>
+                  <option value="dpm_adaptive">dpm_adaptive</option>
+                  <option value="dpmpp_2s_ancestral">dpmpp_2s_ancestral</option>
+                  <option value="dpmpp_sde">dpmpp_sde</option>
+                  <option value="dpmpp_sde_gpu">dpmpp_sde_gpu</option>
+                  <option value="dpmpp_2m">dpmpp_2m</option>
+                  <option value="dpmpp_2m_cfg_pp">dpmpp_2m_cfg_pp</option>
+                  <option value="dpmpp_2m_sde">dpmpp_2m_sde</option>
+                  <option value="dpmpp_2m_sde_gpu">dpmpp_2m_sde_gpu</option>
+                  <option value="dpmpp_3m_sde">dpmpp_3m_sde</option>
+                  <option value="dpmpp_3m_sde_gpu">dpmpp_3m_sde_gpu</option>
+                  <option value="ddpm">ddpm</option>
+                  <option value="lcm">lcm</option>
+                  <option value="ipndm">ipndm</option>
+                  <option value="ipndm_v">ipndm_v</option>
+                  <option value="deis">deis</option>
+                  <option value="ddim">ddim</option>
+                  <option value="uni_pc">uni_pc</option>
+                  <option value="uni_pc_bh2">uni_pc_bh2</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">Scheduler</label>
+                <select id="comfyuiSchedulerInput" style="flex:2">
+                  <option value="normal">normal</option>
+                  <option value="karras">karras</option>
+                  <option value="exponential">exponential</option>
+                  <option value="sgm_uniform">sgm_uniform</option>
+                  <option value="simple">simple</option>
+                  <option value="ddim_uniform">ddim_uniform</option>
+                  <option value="beta">beta</option>
+                  <option value="linear_quadratic">linear_quadratic</option>
+                  <option value="kl_optimal">kl_optimal</option>
+                </select>
+              </div>
+              <div class="setting-row" style="align-items:flex-start">
+                <label class="setting-label" style="flex:1;padding-top:4px">Resolutions</label>
+                <div style="flex:2">
+                  <div id="comfyuiResolutionList"></div>
+                  <button class="small" id="comfyuiAddResolutionBtn" type="button" style="margin-top:4px">+ Add</button>
                 </div>
               </div>
-            </details>
-            <div style="margin-top:14px;text-align:right">
-              <button class="small" id="comfyuiSaveSettingsBtn" type="button">Save ComfyUI Settings</button>
+              <details style="margin-top:12px">
+                <summary style="cursor:pointer;font-size:13px;color:var(--muted)">Custom Workflow JSON (Advanced)</summary>
+                <div style="margin-top:8px">
+                  <textarea id="comfyuiWorkflowJsonTextarea" rows="8"
+                    placeholder="Paste ComfyUI API-format workflow JSON here. Use __PROMPT__ and __NEGATIVE_PROMPT__ as placeholders."
+                    style="width:100%;font-size:11px;font-family:'Space Mono',monospace;resize:vertical"></textarea>
+                  <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                    <button class="small" id="comfyuiValidateWorkflowBtn" type="button">Validate</button>
+                    <span id="comfyuiValidateResult" style="font-size:12px;color:var(--muted)"></span>
+                  </div>
+                </div>
+              </details>
+              <div style="margin-top:14px;text-align:right">
+                <button class="small" id="comfyuiSaveSettingsBtn" type="button">Save ComfyUI Settings</button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+
+      </div><!-- /settingsMain -->
+
+      <!-- Personality editor (replaces settingsMain when editing a personality) -->
       <div class="modal-body" id="personalityEditor" hidden>
-        <div class="setting-section-header" style="margin-bottom:16px">
-          <span class="setting-label" id="personalityEditorTitle">Edit Personality</span>
+        <div class="setting-section-header" style="margin-bottom:14px">
+          <span class="setting-label" id="personalityEditorTitle" style="font-size:15px;font-weight:600">Edit Personality</span>
           <button class="ghost small" id="peCancelBtn" type="button">Cancel</button>
         </div>
         <div class="personality-editor-fields">
           <label class="personality-field-label">Name
             <input id="peNameInput" type="text" placeholder="e.g. Chill Mode" />
           </label>
-          <label class="personality-field-label">Tone Context
-            <textarea id="peToneInput" rows="6" placeholder="Describe tone and personality..."></textarea>
+          <label class="personality-field-label">Tone / Context
+            <textarea id="peToneInput" rows="6" placeholder="Describe tone and personality…"></textarea>
           </label>
           <div class="personality-field-label">TTS Provider
             <div class="setting-toggle" id="peTtsProviderToggle" role="group" aria-label="TTS provider">
@@ -385,11 +510,12 @@
         <div class="personality-editor-actions">
           <button class="primary small" id="peSaveBtn" type="button">Save</button>
         </div>
-      </div>
-    </div>
-  </div>
+      </div><!-- /personalityEditor -->
 
-  <!-- Image lightbox -->
+    </div><!-- /modal -->
+  </div><!-- /settingsBackdrop -->
+
+  <!-- ── Image lightbox ────────────────────────────────────────────────── -->
   <div class="lightbox-backdrop" id="lightboxBackdrop" hidden aria-modal="true" role="dialog" aria-label="Image viewer">
     <div class="lightbox-toolbar">
       <button class="lightbox-btn" id="lightboxZoomOut" type="button" aria-label="Zoom out">&#8722;</button>
@@ -405,11 +531,9 @@
     </div>
   </div>
 
-  <button class="settings-btn" id="settingsBtn" type="button" aria-label="Settings">&#9881;</button>
-
+  <!-- Service toasts -->
   <div id="serviceToasts" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
 </body>
-
 </html>

@@ -69,6 +69,7 @@ COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
 CHAT_MAX_HISTORY = int(os.getenv("CHAT_MAX_HISTORY", "20"))
 CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "4096"))
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
+EMBED_MAX_CHARS = int(os.getenv("EMBED_MAX_CHARS", "8000"))
 COMFYUI_SETTINGS_FILE = BASE_DIR / "comfyui_settings.json"
 
 # Load active checkpoint from persisted settings (fallback to default)
@@ -529,7 +530,8 @@ def _extract_embedding(data: Dict[str, Any]) -> List[float]:
     return []
 
 
-def _ollama_embeddings(text: str) -> List[float]:
+def _ollama_embed_single(text: str) -> List[float]:
+    """Embed a single chunk of text (must be within the model's token limit)."""
     endpoints = [
         ("/api/embeddings", {"model": OLLAMA_EMBED_MODEL, "prompt": text}),
         ("/api/embed", {"model": OLLAMA_EMBED_MODEL, "input": text}),
@@ -554,6 +556,24 @@ def _ollama_embeddings(text: str) -> List[float]:
     if last_error:
         raise last_error
     return []
+
+
+def _ollama_embeddings(text: str) -> List[float]:
+    """Embed text of any length by chunking and averaging embeddings."""
+    if not text:
+        return []
+    # Split into chunks that fit within the model's token limit
+    chunks = [text[i:i + EMBED_MAX_CHARS] for i in range(0, len(text), EMBED_MAX_CHARS)]
+    embeddings = [_ollama_embed_single(chunk) for chunk in chunks]
+    embeddings = [e for e in embeddings if e]
+    if not embeddings:
+        return []
+    if len(embeddings) == 1:
+        return embeddings[0]
+    # Average the chunk embeddings
+    dim = len(embeddings[0])
+    avg = [sum(e[i] for e in embeddings) / len(embeddings) for i in range(dim)]
+    return avg
 
 
 def _merge_system_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

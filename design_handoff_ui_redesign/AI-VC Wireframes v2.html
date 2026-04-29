@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI-VC Wireframes v2</title>
+  <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f0eee9; font-family: 'Caveat', cursive; color: #1a1410; }
+
+    .wf-frame {
+      width: 100%; height: 100%;
+      display: flex; flex-direction: column;
+      background: #f5f2ee;
+      font-family: 'Caveat', cursive;
+      border: 2px solid #1a1410;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* ── primitives ── */
+    .box { border: 2px solid #1a1410; border-radius: 3px; background: #fff; position: relative; }
+    .box.muted { background: #f0ece7; border-color: #9a8f82; }
+    .box.fill  { background: #1a1410; color: #f5f2ee; }
+    .box.light { background: #faf9f7; border-color: #d0c9c0; }
+    .box.accent { background: #d4572a1a; border-color: #d4572a; }
+    .box.teal  { background: #4aa08c1a; border-color: #4aa08c; }
+    .box.dashed { border-style: dashed; background: transparent; border-color: #9a8f82; }
+
+    .lbl { font-family: 'Caveat', cursive; }
+    .lbl.sm  { font-size: 11px; }
+    .lbl.md  { font-size: 13px; }
+    .lbl.lg  { font-size: 16px; font-weight: 700; }
+    .lbl.muted { color: #9a8f82; }
+    .lbl.accent { color: #d4572a; }
+    .lbl.teal { color: #2a8a74; }
+    .lbl.white { color: #f5f2ee; }
+
+    .pill {
+      border: 1.5px solid #9a8f82; border-radius: 20px;
+      padding: 2px 9px; font-family: 'Caveat', cursive; font-size: 11px;
+      background: #faf9f7; display: inline-flex; align-items: center; gap: 3px;
+      white-space: nowrap; cursor: pointer;
+    }
+    .pill.active { background: #1a1410; color: #f5f2ee; border-color: #1a1410; }
+    .pill.accent { background: #d4572a; color: #fff; border-color: #d4572a; }
+    .pill.teal   { background: #4aa08c; color: #fff; border-color: #4aa08c; }
+    .pill.ghost  { background: transparent; border-color: #ffffff44; color: #f5f2ee; }
+
+    .divider { height: 1px; background: #1a141022; width: 100%; flex-shrink: 0; }
+
+    .bubble-user {
+      background: #1a1410; color: #f5f2ee;
+      border-radius: 12px 12px 2px 12px; padding: 5px 9px;
+      font-family: 'Caveat', cursive; font-size: 12px;
+      align-self: flex-end; max-width: 75%;
+    }
+    .bubble-ai {
+      background: #f0ece7; border: 1.5px solid #d0c9c0;
+      border-radius: 12px 12px 12px 2px; padding: 5px 9px;
+      font-family: 'Caveat', cursive; font-size: 12px;
+      align-self: flex-start; max-width: 78%;
+    }
+
+    .callout {
+      background: #fffbe6; border: 1.5px solid #e6c84a;
+      border-radius: 4px; padding: 4px 8px;
+      font-family: 'Caveat', cursive; font-size: 11px; color: #7a6000;
+      flex-shrink: 0;
+    }
+
+    /* diff */
+    .diff-line {
+      font-family: 'Space Mono', monospace; font-size: 8px;
+      padding: 1px 6px; display: flex; gap: 5px;
+    }
+    .diff-line.del { background: #ff000010; color: #900; }
+    .diff-line.add { background: #00880010; color: #060; }
+    .diff-line.ctx { color: #888; }
+    .diff-gutter { min-width: 10px; color: #aaa; }
+
+    /* annotation */
+    .ann {
+      position: absolute; font-family: 'Caveat', cursive;
+      font-size: 11px; color: #d4572a; font-style: italic;
+      pointer-events: none;
+    }
+    .ann::before { content: "← "; }
+    .ann.right::before { content: ""; }
+    .ann.right::after { content: " →"; }
+    .ann.below::before { content: "↑ "; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+/* ─── shared header ─── */
+function AppHeader({ workspace, onWorkspace, sessionOpen, onSessionToggle, thinkingOpen, onThinkingToggle }) {
+  const workspaces = [
+    { id: "chat",  label: "Chat" },
+    { id: "code",  label: "Code" },
+    { id: "image", label: "Image" },
+  ];
+  return (
+    <div className="box fill" style={{
+      display:"flex", alignItems:"center", gap:8,
+      padding:"5px 10px", flexShrink:0, borderRadius:0,
+      borderLeft:"none", borderRight:"none", borderTop:"none"
+    }}>
+      {/* Hamburger */}
+      <button onClick={onSessionToggle} style={{
+        background:"none", border:"1.5px solid #ffffff44", borderRadius:5,
+        color:"#f5f2ee", width:28, height:28, cursor:"pointer",
+        display:"flex", flexDirection:"column", alignItems:"center",
+        justifyContent:"center", gap:3, flexShrink:0, padding:0
+      }}>
+        {[0,1,2].map(i=><span key={i} style={{display:"block",width:12,height:1.5,background:"#f5f2ee"}}/>)}
+      </button>
+
+      {/* Workspace tabs */}
+      <div style={{display:"flex", gap:2, alignItems:"center"}}>
+        {workspaces.map(w => (
+          <button key={w.id} onClick={()=>onWorkspace(w.id)} style={{
+            background:"none", border:"none", cursor:"pointer",
+            fontFamily:"'Caveat',cursive", fontSize: workspace===w.id ? 15 : 13,
+            fontWeight: workspace===w.id ? 700 : 400,
+            color: workspace===w.id ? "#f5f2ee" : "#9a8f82",
+            padding:"2px 7px",
+            borderBottom: workspace===w.id ? "2px solid #d4572a" : "2px solid transparent",
+            transition:"all 0.15s"
+          }}>{w.label}</button>
+        ))}
+      </div>
+
+      <div style={{flex:1}}/>
+
+      {/* Model pill */}
+      <span className="pill ghost" style={{fontSize:10}}>gemma4:e4b ▾</span>
+      <span className="pill ghost" style={{fontSize:10}}>Local ▾</span>
+      {/* Thinking toggle */}
+      <button onClick={onThinkingToggle} style={{
+        background: thinkingOpen ? "rgba(74,160,140,0.3)" : "transparent",
+        border:"1.5px solid rgba(74,160,140,0.6)", borderRadius:6,
+        color:"#7ecfc0", fontFamily:"'Caveat',cursive", fontSize:11,
+        padding:"2px 8px", cursor:"pointer", transition:"all 0.15s"
+      }}>🧠 Thinking</button>
+      {/* Settings */}
+      <button style={{
+        background:"none", border:"1.5px solid #ffffff33", borderRadius:6,
+        color:"#9a8f82", width:26, height:26, cursor:"pointer", fontSize:13
+      }}>⚙</button>
+    </div>
+  );
+}
+
+/* ─── Sessions overlay drawer ─── */
+function SessionsDrawer({ open, onClose }) {
+  if (!open) return null;
+  return (
+    <div style={{position:"absolute",inset:0,zIndex:20,display:"flex",pointerEvents:"all"}}>
+      {/* Panel */}
+      <div className="box light" style={{
+        width:175, height:"100%", display:"flex", flexDirection:"column",
+        padding:10, gap:7, borderRadius:0, borderLeft:"none",
+        borderTop:"none", borderBottom:"none",
+        boxShadow:"6px 0 24px #00000033", flexShrink:0
+      }}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+          <span className="lbl lg">Sessions</span>
+          <span onClick={onClose} style={{cursor:"pointer",fontSize:12,color:"#9a8f82"}}>✕</span>
+        </div>
+        <div className="divider"/>
+        <span className="pill accent" style={{justifyContent:"center"}}>+ New session</span>
+        <span className="pill" style={{justifyContent:"center", fontSize:10}}>+ Personality session</span>
+        <div className="divider"/>
+        {[
+          {id:"163B2641", date:"4/19/26 12:32pm", active:true},
+          {id:"14A9F320", date:"4/18/26 9:14am",  active:false},
+          {id:"12CC09AB", date:"4/17/26 3:55pm",  active:false},
+        ].map(s => (
+          <div key={s.id} className={s.active ? "box accent" : "box muted"} style={{padding:"5px 8px", cursor:"pointer"}}>
+            <span className="lbl md">{s.id}</span><br/>
+            <span className="lbl sm muted">{s.date}</span>
+            {s.active && <div style={{display:"flex",gap:4,marginTop:4}}>
+              <span className="pill" style={{fontSize:9}}>Rename</span>
+              <span className="pill" style={{fontSize:9,color:"#c00",borderColor:"#c00"}}>Delete</span>
+            </div>}
+          </div>
+        ))}
+      </div>
+      {/* Scrim */}
+      <div onClick={onClose} style={{flex:1, background:"#00000044"}}/>
+    </div>
+  );
+}
+
+/* ─── Thinking panel (persistent) ─── */
+function ThinkingPanel({ open }) {
+  if (!open) return null;
+  return (
+    <div className="box teal" style={{
+      width:175, flexShrink:0, display:"flex", flexDirection:"column",
+      padding:10, gap:7, borderRadius:0,
+      borderRight:"none", borderTop:"none", borderBottom:"none",
+      overflow:"auto"
+    }}>
+      <span className="lbl lg teal">Thinking</span>
+      <div className="divider"/>
+      <span className="lbl md" style={{fontWeight:700}}>Tools used</span>
+      <span className="lbl sm" style={{color:"#2a8a74"}}>• web_search("pirate ship")</span>
+      <span className="lbl sm" style={{color:"#2a8a74"}}>• image_gen(prompt)</span>
+      <div className="divider"/>
+      <span className="lbl md" style={{fontWeight:700}}>Screenshot</span>
+      <div className="box dashed" style={{height:50, display:"flex", alignItems:"center", justifyContent:"center"}}>
+        <span className="lbl sm muted">[ screen cap ]</span>
+      </div>
+      <div className="divider"/>
+      <span className="lbl md" style={{fontWeight:700}}>Silent response</span>
+      <span className="lbl sm muted">No silent response yet.</span>
+      <div className="divider"/>
+      <span className="lbl md" style={{fontWeight:700}}>Raw output</span>
+      <span className="pill" style={{fontSize:10, justifyContent:"center"}}>Show raw output</span>
+      <div className="divider"/>
+      <span className="lbl md" style={{fontWeight:700}}>Full context</span>
+      <span className="pill" style={{fontSize:10, justifyContent:"center"}}>Show full context</span>
+      <div style={{marginTop:"auto"}}>
+        <div className="divider"/>
+        <div style={{display:"flex", justifyContent:"space-between", paddingTop:4}}>
+          <span className="lbl sm muted">VRAM 1.5/4 GB</span>
+          <span className="lbl sm muted">~1.2k tokens</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── Settings modal ─── */
+function SettingsModal({ open, onClose }) {
+  if (!open) return null;
+  return (
+    <div style={{position:"absolute",inset:0,zIndex:30,background:"#00000066",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div className="box light" style={{width:320, maxHeight:"80%", overflow:"auto", padding:14, display:"flex", flexDirection:"column", gap:10}}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+          <span className="lbl lg">Settings</span>
+          <span onClick={onClose} style={{cursor:"pointer", fontSize:13, color:"#9a8f82"}}>✕</span>
+        </div>
+        <div className="divider"/>
+        {/* Search method */}
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+          <span className="lbl md">Search method</span>
+          <div style={{display:"flex", gap:4}}>
+            {["SearXNG","Brave","None"].map((o,i)=>(
+              <span key={o} className={`pill${i===0?" active":""}`} style={{fontSize:10}}>{o}</span>
+            ))}
+          </div>
+        </div>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+          <span className="lbl md">Max history messages</span>
+          <div className="box" style={{padding:"2px 8px", width:50, textAlign:"right"}}><span className="lbl md">20</span></div>
+        </div>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+          <span className="lbl md">Max context tokens</span>
+          <div className="box" style={{padding:"2px 8px", width:50, textAlign:"right"}}><span className="lbl md">4k</span></div>
+        </div>
+        <div className="divider"/>
+        <span className="lbl md" style={{fontWeight:700}}>Personalities</span>
+        {["Testing","Chill Mode","Assistant"].map(p=>(
+          <div key={p} className="box muted" style={{padding:"4px 8px", display:"flex", justifyContent:"space-between"}}>
+            <span className="lbl sm">{p}</span>
+            <div style={{display:"flex", gap:4}}>
+              <span className="pill" style={{fontSize:9}}>Edit</span>
+              <span className="pill" style={{fontSize:9, color:"#c00", borderColor:"#c00"}}>Delete</span>
+            </div>
+          </div>
+        ))}
+        <span className="pill" style={{justifyContent:"center", fontSize:10}}>+ Add personality</span>
+        <div className="divider"/>
+        {/* Services */}
+        <span className="lbl md" style={{fontWeight:700}}>Services</span>
+        {[
+          {name:"Kokoro TTS", status:"Running", statusColor:"#080"},
+          {name:"ComfyUI",    status:"Stopped", statusColor:"#c00"},
+        ].map(svc=>(
+          <div key={svc.name} style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+            <div>
+              <span className="lbl md">{svc.name}</span>
+              <span className="lbl sm" style={{color:svc.statusColor, marginLeft:6}}>● {svc.status}</span>
+            </div>
+            <span className="pill" style={{fontSize:10}}>Configure</span>
+          </div>
+        ))}
+        <div className="divider"/>
+        {/* Capture settings */}
+        <span className="lbl md" style={{fontWeight:700}}>Capture</span>
+        <div style={{display:"flex", justifyContent:"space-between"}}>
+          <span className="lbl sm">Thinking interval</span>
+          <div className="box" style={{padding:"2px 8px", width:50, textAlign:"right"}}><span className="lbl md">120s</span></div>
+        </div>
+        <div style={{display:"flex", justifyContent:"space-between"}}>
+          <span className="lbl sm">Screenshot interval</span>
+          <div className="box" style={{padding:"2px 8px", width:50, textAlign:"right"}}><span className="lbl md">240s</span></div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   ARTBOARD 1 — Chat Workspace
+   ═══════════════════════════════════════ */
+function ChatWorkspace() {
+  const [sessionOpen, setSessionOpen] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  return (
+    <div className="wf-frame">
+      {/* Header */}
+      <AppHeader
+        workspace="chat"
+        onWorkspace={()=>{}}
+        sessionOpen={sessionOpen}
+        onSessionToggle={()=>setSessionOpen(v=>!v)}
+        thinkingOpen={thinkingOpen}
+        onThinkingToggle={()=>setThinkingOpen(v=>!v)}
+      />
+
+      {/* Body row */}
+      <div style={{flex:1, display:"flex", minHeight:0, position:"relative"}}>
+        <SessionsDrawer open={sessionOpen} onClose={()=>setSessionOpen(false)} />
+        <SettingsModal open={settingsOpen} onClose={()=>setSettingsOpen(false)} />
+
+        {/* Main chat */}
+        <div style={{flex:1, display:"flex", flexDirection:"column", minWidth:0, padding:10, gap:8}}>
+          {/* Chat log */}
+          <div style={{flex:1, display:"flex", flexDirection:"column", gap:7, overflow:"hidden"}}>
+            <div className="bubble-ai">Hello! How can I help you today?</div>
+            <div className="bubble-user">Generate an image of a pirate ship</div>
+            <div className="bubble-ai" style={{display:"flex",flexDirection:"column",gap:4}}>
+              <div className="box dashed" style={{width:120,height:64,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span className="lbl sm muted">[ generated image ]</span>
+              </div>
+              Image generated.
+            </div>
+            <div style={{marginTop:"auto", paddingTop:6, borderTop:"1px dashed #ccc5bc"}}>
+              <span className="lbl sm muted">● Listening…</span>
+            </div>
+          </div>
+
+          {/* Composer */}
+          <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <span className="pill" style={{fontSize:13, padding:"4px 10px"}}>🎤</span>
+              <div className="box" style={{flex:1,padding:"6px 10px",background:"#faf9f7"}}>
+                <span className="lbl md muted">Type a message…</span>
+              </div>
+              <span className="pill" style={{fontSize:13, padding:"4px 10px"}}>📎</span>
+              <span className="pill accent" style={{padding:"4px 14px"}}>Send</span>
+            </div>
+            {/* Secondary tools row — collapsed to a single strip */}
+            <div style={{display:"flex",gap:4,justifyContent:"flex-start",flexWrap:"wrap"}}>
+              <span className="pill" style={{fontSize:10}}>🖥 Screen: off</span>
+              <span className="pill" style={{fontSize:10}}>⏱ Idle capture: off</span>
+              <span className="pill active" style={{fontSize:10}}>🔁 Thinking loop: on</span>
+              <span className="pill" style={{fontSize:10}}>TTS: off</span>
+              <span className="pill" style={{fontSize:10}}>Testing ▾</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Thinking panel — persistent right */}
+        <ThinkingPanel open={thinkingOpen} />
+      </div>
+
+      {/* Annotations */}
+      <div style={{position:"absolute",top:8,left:42,pointerEvents:"none"}}>
+        <span className="ann below" style={{fontSize:10,color:"#d4572a",fontStyle:"italic"}}>hamburger → sessions overlay</span>
+      </div>
+      <div style={{position:"absolute",top:8,right:192,pointerEvents:"none"}}>
+        <span className="ann right" style={{fontSize:10,color:"#2a8a74",fontStyle:"italic"}}>thinking toggle</span>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   ARTBOARD 2 — Code Workspace
+   ═══════════════════════════════════════ */
+function CodeWorkspace() {
+  const [sessionOpen, setSessionOpen] = useState(false);
+  const [thinkingOpen, setThinkingOpen] = useState(true);
+  const [approved, setApproved] = useState({});
+
+  const changes = [
+    {file:"src/app.py", lines:[
+      {t:"ctx",n:"12",c:"def handle_message(msg):"},
+      {t:"del",n:"13",c:'    print("debug:", msg)'},
+      {t:"add",n:"13",c:'    logger.debug("msg: %s", msg)'},
+      {t:"ctx",n:"14",c:"    return process(msg)"},
+    ]},
+    {file:"src/utils.py", lines:[
+      {t:"ctx",n:"5", c:"import os"},
+      {t:"add",n:"6", c:"import logging"},
+      {t:"add",n:"7", c:"logger = logging.getLogger(__name__)"},
+    ]},
+  ];
+
+  return (
+    <div className="wf-frame">
+      <AppHeader
+        workspace="code"
+        onWorkspace={()=>{}}
+        sessionOpen={sessionOpen}
+        onSessionToggle={()=>setSessionOpen(v=>!v)}
+        thinkingOpen={thinkingOpen}
+        onThinkingToggle={()=>setThinkingOpen(v=>!v)}
+      />
+
+      <div style={{flex:1,display:"flex",minHeight:0,position:"relative"}}>
+        <SessionsDrawer open={sessionOpen} onClose={()=>setSessionOpen(false)} />
+
+        {/* File tree — always visible */}
+        <div className="box light" style={{
+          width:135, flexShrink:0, display:"flex", flexDirection:"column",
+          padding:8, gap:5, borderRadius:0, borderLeft:"none",
+          borderTop:"none", borderBottom:"none", overflow:"auto"
+        }}>
+          <span className="lbl lg">Files</span>
+          <div className="divider"/>
+          <span className="pill accent" style={{justifyContent:"center", fontSize:10}}>+ Add file</span>
+          <div style={{display:"flex",flexDirection:"column",gap:3,marginTop:4}}>
+            {[
+              {path:"src/",      type:"dir"},
+              {path:"  app.py",  changed:true,  selected:true},
+              {path:"  utils.py",changed:true},
+              {path:"  models.py"},
+              {path:"  config.py"},
+              {path:"tests/",    type:"dir"},
+              {path:"  test_app.py"},
+              {path:"requirements.txt"},
+            ].map((f,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"center",gap:3}}>
+                <span className="lbl sm" style={{
+                  color: f.type==="dir" ? "#1a1410" :
+                         f.selected ? "#d4572a" :
+                         f.changed ? "#d4572a" : "#9a8f82",
+                  fontWeight: f.type==="dir" ? 700 : 400
+                }}>{f.path}</span>
+                {f.changed && <span style={{color:"#d4572a",fontSize:9}}>●</span>}
+              </div>
+            ))}
+          </div>
+          <div className="divider" style={{marginTop:"auto"}}/>
+          <span className="lbl sm muted">2 files modified</span>
+        </div>
+
+        {/* Diff panel */}
+        <div style={{flex:1,display:"flex",flexDirection:"column",padding:8,gap:6,minWidth:0,overflow:"auto"}}>
+          {/* Bulk actions */}
+          <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+            <span className="lbl sm muted">2 files · 3 additions · 1 deletion</span>
+            <div style={{flex:1}}/>
+            <span className="pill teal" style={{fontSize:10}} onClick={()=>setApproved({0:true,1:true})}>✓ Approve all</span>
+            <span className="pill" style={{fontSize:10,borderColor:"#c00",color:"#c00"}} onClick={()=>setApproved({0:false,1:false})}>✕ Deny all</span>
+          </div>
+
+          {changes.map((ch,ci)=>(
+            <div key={ci} className="box" style={{overflow:"hidden",flexShrink:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:"#1a1410"}}>
+                <span className="lbl sm white">{ch.file}</span>
+                <div style={{flex:1}}/>
+                {approved[ci] === undefined && <>
+                  <span className="pill teal" style={{fontSize:9,cursor:"pointer"}} onClick={()=>setApproved(a=>({...a,[ci]:true}))}>✓ Approve</span>
+                  <span className="pill" style={{fontSize:9,cursor:"pointer",borderColor:"#c00",color:"#c00"}} onClick={()=>setApproved(a=>({...a,[ci]:false}))}>✕ Deny</span>
+                </>}
+                {approved[ci]===true  && <span className="pill teal" style={{fontSize:9}}>✓ Approved</span>}
+                {approved[ci]===false && <span className="pill" style={{fontSize:9,borderColor:"#c00",color:"#c00"}}>✕ Denied</span>}
+              </div>
+              <div style={{background:"#0d0d0d"}}>
+                {ch.lines.map((l,li)=>(
+                  <div key={li} className={`diff-line ${l.t}`}>
+                    <span className="diff-gutter">{l.t==="del"?"-":l.t==="add"?"+":""}</span>
+                    <span className="diff-gutter" style={{minWidth:16}}>{l.n}</span>
+                    <span>{l.c}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {/* Composer at bottom */}
+          <div style={{marginTop:"auto",flexShrink:0}}>
+            <div style={{display:"flex",gap:6,alignItems:"center"}}>
+              <div className="box" style={{flex:1,padding:"5px 10px",background:"#faf9f7"}}>
+                <span className="lbl sm muted">Ask AI to edit files…</span>
+              </div>
+              <span className="pill accent" style={{padding:"4px 14px"}}>Run</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Thinking panel */}
+        <ThinkingPanel open={thinkingOpen} />
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   ARTBOARD 3 — Settings Modal
+   ═══════════════════════════════════════ */
+function SettingsArtboard() {
+  return (
+    <div className="wf-frame" style={{position:"relative"}}>
+      <AppHeader workspace="chat" onWorkspace={()=>{}} sessionOpen={false} onSessionToggle={()=>{}} thinkingOpen={false} onThinkingToggle={()=>{}}/>
+      {/* Dimmed BG */}
+      <div style={{flex:1,background:"#1a141044",position:"relative",display:"flex",alignItems:"flex-start",justifyContent:"center",paddingTop:20}}>
+        <div className="box light" style={{width:300,padding:14,display:"flex",flexDirection:"column",gap:9}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl lg">Settings</span>
+            <span className="lbl sm muted" style={{cursor:"pointer"}}>✕ Close</span>
+          </div>
+          <div className="divider"/>
+
+          {/* Model & provider */}
+          <span className="lbl md" style={{fontWeight:700}}>Model</span>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl sm">Source</span>
+            <div style={{display:"flex",gap:4}}>
+              {["Local","API"].map((o,i)=><span key={o} className={`pill${i===0?" active":""}`} style={{fontSize:10}}>{o}</span>)}
+            </div>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl sm">Model</span>
+            <div className="box" style={{padding:"2px 8px",minWidth:100}}><span className="lbl sm">gemma4:e4b ▾</span></div>
+          </div>
+          <div className="divider"/>
+
+          {/* TTS */}
+          <span className="lbl md" style={{fontWeight:700}}>Voice (TTS)</span>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl sm">TTS enabled</span>
+            <span className="pill active" style={{fontSize:10}}>On</span>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl sm">Provider</span>
+            <div style={{display:"flex",gap:4}}>
+              {["Browser","Kokoro"].map((o,i)=><span key={o} className={`pill${i===1?" active":""}`} style={{fontSize:10}}>{o}</span>)}
+            </div>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl sm">Voice</span>
+            <div className="box" style={{padding:"2px 8px",minWidth:100}}><span className="lbl sm">af_bella ▾</span></div>
+          </div>
+          <div className="divider"/>
+
+          {/* Context */}
+          <span className="lbl md" style={{fontWeight:700}}>Context</span>
+          {[["Max history","20 msgs"],["Max tokens","4k"],["Max RAG results","4"]].map(([k,v])=>(
+            <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span className="lbl sm">{k}</span>
+              <div className="box" style={{padding:"2px 8px",minWidth:60,textAlign:"right"}}><span className="lbl sm">{v}</span></div>
+            </div>
+          ))}
+          <div className="divider"/>
+
+          {/* Personalities */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <span className="lbl md" style={{fontWeight:700}}>Personalities</span>
+            <span className="pill" style={{fontSize:10}}>+ Add</span>
+          </div>
+          {["Testing","Chill Mode"].map(p=>(
+            <div key={p} className="box muted" style={{padding:"3px 7px",display:"flex",justifyContent:"space-between"}}>
+              <span className="lbl sm">{p}</span>
+              <div style={{display:"flex",gap:4}}>
+                <span className="pill" style={{fontSize:9}}>Edit</span>
+                <span className="pill" style={{fontSize:9,color:"#c00",borderColor:"#c00"}}>Delete</span>
+              </div>
+            </div>
+          ))}
+          <div className="divider"/>
+
+          {/* Services */}
+          <span className="lbl md" style={{fontWeight:700}}>Services</span>
+          {[["Kokoro TTS","●  Running","#080"],["ComfyUI","●  Stopped","#c00"]].map(([name,st,col])=>(
+            <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <span className="lbl sm">{name}</span>
+                <span className="lbl sm" style={{color:col,marginLeft:6}}>{st}</span>
+              </div>
+              <span className="pill" style={{fontSize:9}}>Configure ▾</span>
+            </div>
+          ))}
+          <div className="divider"/>
+
+          {/* Capture */}
+          <span className="lbl md" style={{fontWeight:700}}>Capture timing</span>
+          {[["Thinking interval","120s"],["Screenshot interval","240s"]].map(([k,v])=>(
+            <div key={k} style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span className="lbl sm">{k}</span>
+              <div className="box" style={{padding:"2px 8px",minWidth:55,textAlign:"right"}}><span className="lbl sm">{v}</span></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─── main ─── */
+function App() {
+  return (
+    <DesignCanvas title="AI-VC · Refined Direction">
+      <DCSection id="screens" title="Core Screens">
+        <DCArtboard id="chat" label="Chat Workspace (interactive)" width={720} height={500}>
+          <div style={{width:"100%",height:"100%"}}><ChatWorkspace /></div>
+        </DCArtboard>
+        <DCArtboard id="code" label="Code Workspace (interactive)" width={820} height={500}>
+          <div style={{width:"100%",height:"100%"}}><CodeWorkspace /></div>
+        </DCArtboard>
+        <DCArtboard id="settings" label="Settings Modal" width={440} height={500}>
+          <div style={{width:"100%",height:"100%"}}><SettingsArtboard /></div>
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
