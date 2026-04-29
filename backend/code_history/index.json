@@ -1,0 +1,19 @@
+{
+  "change_groups": [
+    {
+      "id": "20260429T054019_14640993",
+      "code_session_id": "code_mojk97ls_qtbtbjtag9",
+      "created_at": "2026-04-29T05:40:19.491540",
+      "size_bytes": 837,
+      "prompt_text": "Just create a file where you think it should go, name it whatever you want, and write a quick story thats about 150 words long"
+    },
+    {
+      "id": "20260429T054115_a2ad6e5b",
+      "code_session_id": "code_mojk97ls_qtbtbjtag9",
+      "created_at": "2026-04-29T05:41:15.819586",
+      "size_bytes": 834,
+      "prompt_text": "Can you edit that and add more to it?"
+    }
+  ],
+  "total_bytes": 1671
+}

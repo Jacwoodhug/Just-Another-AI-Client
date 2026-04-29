@@ -180,12 +180,10 @@
         <div id="providerBadge" hidden></div>
       </div><!-- /chatWorkspace -->
 
-      <!-- Code workspace (placeholder) -->
-      <div class="workspace" id="codeWorkspace" data-workspace="code" hidden
-        style="align-items:center;justify-content:center;gap:10px">
-        <span style="font-size:14px;color:var(--muted)">Code workspace</span>
-        <span style="font-size:12px;color:rgba(184,168,143,0.45)">Coming soon</span>
-      </div>
+      <!-- Code workspace -->
+      <div class="workspace" id="codeWorkspace" data-workspace="code" hidden>
+        <!-- Rendered by React: frontend/src/components/CodeWorkspace -->
+      </div><!-- /codeWorkspace -->
 
       <!-- Image workspace (placeholder) -->
       <div class="workspace" id="imageWorkspace" data-workspace="image" hidden
@@ -535,5 +533,6 @@
   <div id="serviceToasts" aria-live="polite"></div>
 
   <script src="/static/app.js"></script>
+  <script src="/static/assets/code-workspace.js"></script>
 </body>
 </html>

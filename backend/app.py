@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -405,6 +405,140 @@ def _build_tool_definitions(checkpoint: Optional[str] = None) -> List[Dict[str, 
     return tools
 
 
+# ── Code Workspace tool definitions ──────────────────────────────────────
+
+CODE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "readFile",
+            "description": "Read a file's contents. Provide start_line and/or end_line (1-indexed, inclusive) to read a range; omit both for the whole file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file."},
+                    "start_line": {"type": "integer", "description": "First line to read (1-indexed, inclusive). Omit to start from line 1."},
+                    "end_line": {"type": "integer", "description": "Last line to read (1-indexed, inclusive). Omit to read through EOF."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "findFiles",
+            "description": "Find files matching a glob pattern inside a directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern, e.g. '**/*.py'."},
+                    "directory": {"type": "string", "description": "Directory to search in."},
+                },
+                "required": ["pattern", "directory"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listDirectory",
+            "description": "List files and folders in a directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "Absolute path to the directory."},
+                },
+                "required": ["directory"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "searchInFile",
+            "description": "Case-insensitive substring search in a file. Returns each match with 2 lines of context before and after.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file."},
+                    "query": {"type": "string", "description": "Search string (case-insensitive)."},
+                },
+                "required": ["path", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "writeFile",
+            "description": "Overwrite a file with new content. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file."},
+                    "content": {"type": "string", "description": "New file content."},
+                    "summary": {"type": "string", "description": "Reason for the change (shown to user for approval)."},
+                },
+                "required": ["path", "content", "summary"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "createFile",
+            "description": "Create a new file. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path for the new file."},
+                    "content": {"type": "string", "description": "Initial file content."},
+                    "summary": {"type": "string", "description": "Reason for creating this file (shown to user for approval)."},
+                },
+                "required": ["path", "content", "summary"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deleteFile",
+            "description": "Delete a file. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file."},
+                    "summary": {"type": "string", "description": "Reason for deleting (shown to user for approval)."},
+                },
+                "required": ["path", "summary"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "runCommand",
+            "description": "Run a shell command inside the workspace. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run."},
+                    "cwd": {"type": "string", "description": "Working directory (must be inside the workspace)."},
+                    "summary": {"type": "string", "description": "Reason for running this command (shown to user for approval)."},
+                },
+                "required": ["command", "cwd", "summary"],
+            },
+        },
+    },
+]
+
+_CODE_APPROVAL_TOOLS = {"writeFile", "createFile", "deleteFile", "runCommand"}
+_CODE_READ_ONLY_TOOLS = {"readFile", "findFiles", "listDirectory", "searchInFile"}
+_CODE_SKIPPED_BINARY = "[Skipped: file too large or binary]"
+_CODE_FILE_SIZE_LIMIT = 5 * 1024 * 1024  # 5 MB
+
+
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     text: Optional[str] = None
@@ -420,6 +554,15 @@ class ChatRequest(BaseModel):
     max_context_tokens: Optional[int] = None
     max_rag_results: Optional[int] = None
     regenerate: Optional[bool] = False
+    # Code Workspace fields
+    workspace: Optional[str] = None        # "chat" | "code" | "image"
+    code_session_id: Optional[str] = None
+    workspace_dirs: Optional[List[str]] = Field(default_factory=list)
+    pre_approved_read_paths: Optional[List[str]] = Field(default_factory=list)
+    prevented_paths: Optional[List[str]] = Field(default_factory=list)
+    hidden_paths: Optional[List[str]] = Field(default_factory=list)
+    run_timeout_seconds: Optional[int] = 30
+    run_output_cap_kb: Optional[int] = 50
 
 
 class ChatResponse(BaseModel):
@@ -433,6 +576,14 @@ class ChatResponse(BaseModel):
     request_reason: str = ""
     context_debug: str = ""
     raw_output: str = ""
+    # Code Workspace fields
+    pending_tool_approval: Optional[Dict[str, Any]] = None
+    auto_executed: List[Dict[str, Any]] = Field(default_factory=list)
+    original_content: Optional[str] = None
+    new_content: Optional[str] = None
+    change_id: Optional[str] = None
+    next_undo_summary: Optional[str] = None
+    next_redo_summary: Optional[str] = None
 
 
 class GenerateImageRequest(BaseModel):
@@ -490,6 +641,13 @@ def _get_yaml_store(personality_id: Optional[str]) -> YamlMemoryStore:
     return _personality_yaml_stores[personality_id]
 
 
+# Mount more specific path first so it isn't shadowed by the broader /static mount.
+# Serve compiled React bundle from frontend-dist/assets/ at /static/assets/
+_FRONTEND_DIST_ASSETS = BASE_DIR.parent / "frontend-dist" / "assets"
+if _FRONTEND_DIST_ASSETS.exists():
+    app.mount("/static/assets", StaticFiles(directory=str(_FRONTEND_DIST_ASSETS)), name="static-assets")
+
+# Serve app.js, styles.css, index.html etc from frontend/
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
 # Suppress /api/vram from uvicorn access log (high-frequency polling)
@@ -1657,6 +1815,167 @@ def _parse_sections(body: str) -> Tuple[str, str]:
     return spoken_text, silent_text
 
 
+# ── Code Workspace system prompt ──────────────────────────────────────────────
+
+def _build_code_system_prompt(registered_dirs: List[str], pre_approved_paths: List[str]) -> str:
+    dirs_str = "\n".join(f"  - {d}" for d in registered_dirs) if registered_dirs else "  (none)"
+    if pre_approved_paths:
+        paths_str = "\n".join(f"  - {p}" for p in pre_approved_paths)
+    else:
+        paths_str = "  (none selected — use listDirectory to explore)"
+    return f"""You are in Code Workspace mode. You have access to file and command tools for reading
+and editing the user's codebase, plus the full set of base tools.
+
+── Code tools (run automatically, no `summary` needed) ──────────────────────────────
+  readFile(path, start_line?, end_line?)
+      — read a file's contents. Line numbers are 1-indexed and inclusive.
+        Omit both for the whole file; pass start_line alone to read from there
+        to EOF; pass end_line alone to read from line 1 to there.
+  findFiles(pattern, directory) — find files matching a glob pattern
+  listDirectory(directory)      — list files/folders accessible to you in a directory
+  searchInFile(path, query)     — case-insensitive substring search; returns each
+                                  match with 2 lines of context before and after.
+
+── Code tools (require user approval — `summary` field required) ────────────────────
+  writeFile(path, content, summary)   — overwrite a file
+  createFile(path, content, summary)  — create a new file
+  deleteFile(path, summary)           — delete a file
+  runCommand(command, cwd, summary)   — run a shell command inside the workspace
+
+── Base tools (always available, use as normal) ─────────────────────────────────────
+  webSearch — look up documentation, APIs, or anything you need to research.
+  requestScreenshot — ask the user to capture a screenshot of the running app.
+  generateImage — generate an image asset.
+  memoryStore(content) — store a durable fact (conventions, preferences).
+  memoryEdit(id, content) — update an existing memory entry.
+  memoryDelete(id) — remove a memory entry.
+
+── Workspace ────────────────────────────────────────────────────────────────────────
+Registered directories (only paths inside these are accessible to code tools):
+{dirs_str}
+
+The user has pre-selected these files as relevant context — start by reading them
+if useful:
+{paths_str}
+
+Use listDirectory to discover other files.
+
+If you receive one of these error responses from a code tool, acknowledge and do not retry:
+  [Out of scope]    — the path is not inside a registered workspace directory
+  [Edit prevented]  — the user has protected that file from modification
+  [Hidden]          — the file is not in your accessible tree
+  [Denied by user]  — the user declined your action
+"""
+
+
+def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
+    """Handle a chat request in Code Workspace mode."""
+    code_session_id = request.code_session_id or str(uuid.uuid4())
+    user_text = (request.text or "").strip()
+    personality_id = (request.personality_id or "default").strip()
+    search_method = (request.search_method or "searxng").lower()
+    active_yaml_store = _get_yaml_store(personality_id)
+    active_store = _get_store(personality_id)
+    provider = _normalize_provider(request.provider)
+    default_model = _default_model(provider)
+    selected_model = (request.model or default_model).strip() or default_model
+
+    workspace_dirs = list(request.workspace_dirs or [])
+    pre_approved = list(request.pre_approved_read_paths or [])
+    prevented = list(request.prevented_paths or [])
+    hidden = list(request.hidden_paths or [])
+    run_timeout = int(request.run_timeout_seconds or 30)
+    run_output_cap = int(request.run_output_cap_kb or 50)
+
+    # Code workspace uses its own session for message history
+    recent = active_store.get_recent(code_session_id, limit=CHAT_MAX_HISTORY)
+
+    memory_context = active_yaml_store.format_for_context()
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "system", "content": _build_code_system_prompt(workspace_dirs, pre_approved)},
+        {"role": "system", "content": _current_time_context()},
+    ]
+    if memory_context:
+        messages.append({"role": "system", "content": memory_context})
+
+    # No RAG retrieval in code workspace — source files are the context
+    messages.extend(_format_recent_messages(recent))
+    messages.append({"role": "user", "content": user_text})
+
+    tools = _build_tool_definitions(COMFYUI_CHECKPOINT) + CODE_TOOL_DEFINITIONS
+
+    # Initialize in-flight group
+    _code_inflight_groups[code_session_id] = {"paths": {}, "prompt_text": user_text}
+
+    try:
+        final_text, tool_calls_made, pending_approval, auto_exec = _run_code_tool_loop(
+            messages, tools, selected_model, provider, active_yaml_store, search_method,
+            code_session_id, workspace_dirs, prevented, hidden, user_text,
+            run_timeout, run_output_cap,
+        )
+    except Exception as exc:
+        final_text = f"Error: {exc}"
+        pending_approval = None
+        auto_exec = []
+        tool_calls_made = []
+
+    # Commit change group if loop is fully done
+    change_id: Optional[str] = None
+    if pending_approval is None:
+        group = _code_inflight_groups.pop(code_session_id, {})
+        if group.get("paths"):
+            change_id = _commit_change_group(code_session_id, user_text, group)
+
+    # Store message history (bare user prompt + short spoken text only)
+    active_store.add_message(code_session_id, "user", user_text, None)
+    spoken, _ = _parse_sections(final_text)
+    spoken_text = spoken or final_text
+    _CODE_CODE_FENCE_RE = re.compile(r"```")
+    _CODE_INDENT_RE = re.compile(r"^[ \t]{2,}", re.MULTILINE)
+    is_code_heavy = (
+        len(spoken_text) > 800
+        and (bool(_CODE_CODE_FENCE_RE.search(spoken_text)) or len(_CODE_INDENT_RE.findall(spoken_text)) >= 2)
+    )
+    if spoken_text and not is_code_heavy:
+        active_store.add_message(code_session_id, "assistant", spoken_text, None)
+
+    undo_s, redo_s = _undo_redo_summaries(code_session_id)
+
+    if pending_approval:
+        return ChatResponse(
+            session_id=code_session_id,
+            assistant_text=spoken_text,
+            silent_text="",
+            speak=False,
+            tool_calls_made=tool_calls_made,
+            provider=provider,
+            pending_tool_approval={
+                "call_id": pending_approval["call_id"],
+                "tool_name": pending_approval["name"],
+                "path_or_command": pending_approval.get("path_or_command", ""),
+                "summary": pending_approval["summary"],
+                "warnings": pending_approval.get("warnings", []),
+            },
+            auto_executed=auto_exec,
+            next_undo_summary=undo_s,
+            next_redo_summary=redo_s,
+        )
+
+    return ChatResponse(
+        session_id=code_session_id,
+        assistant_text=spoken_text,
+        silent_text="",
+        speak=bool(spoken_text),
+        tool_calls_made=tool_calls_made,
+        provider=provider,
+        change_id=change_id,
+        auto_executed=auto_exec,
+        next_undo_summary=undo_s,
+        next_redo_summary=redo_s,
+    )
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     session_id = request.session_id or str(uuid.uuid4())
@@ -1670,6 +1989,24 @@ def chat(request: ChatRequest) -> ChatResponse:
     personality_id = (request.personality_id or "default").strip()
     tone_context = (request.tone_context or "").strip() or None
     active_store = _get_store(personality_id)
+    workspace = (request.workspace or "chat").lower()
+
+    # ── Code workspace branch ────────────────────────────────────────────
+    if workspace == "code":
+        if not user_text:
+            # Allow null text for state-only pings (undo/redo state)
+            code_session_id = request.code_session_id or str(uuid.uuid4())
+            undo_s, redo_s = _undo_redo_summaries(code_session_id)
+            return ChatResponse(
+                session_id=session_id,
+                assistant_text="",
+                silent_text="",
+                speak=False,
+                next_undo_summary=undo_s,
+                next_redo_summary=redo_s,
+            )
+        return _chat_code_workspace(request, session_id)
+
     if not user_text and not has_image:
         raise HTTPException(status_code=400, detail="Text or image is required")
     provider = _normalize_provider(request.provider)
@@ -2644,3 +2981,1035 @@ def comfyui_validate_workflow(body: Dict[str, Any]) -> Dict[str, Any]:
 
     missing = sorted(used_types - known_types)
     return {"valid": len(missing) == 0, "missing_nodes": missing}
+
+
+# =============================================================================
+# Code Workspace Backend
+# =============================================================================
+
+import fnmatch
+import hashlib
+import shlex
+import shutil
+import threading
+
+CODE_HISTORY_DIR = BASE_DIR / "code_history"
+_CODE_HISTORY_LOCK = threading.Lock()
+
+# ── In-memory state ───────────────────────────────────────────────────────────
+
+# Pending approval queue: keyed by code_session_id
+_pending_code_approvals: Dict[str, Dict[str, Any]] = {}
+
+# Undo/redo stacks: keyed by code_session_id
+_code_history: Dict[str, List[Dict[str, Any]]] = {}
+_code_history_redo: Dict[str, List[Dict[str, Any]]] = {}
+_code_history_total_bytes: int = 0
+
+# In-flight change groups: keyed by code_session_id
+_code_inflight_groups: Dict[str, Dict[str, Any]] = {}
+
+# Storage limit (bytes); loaded from config.json on startup
+_code_storage_limit_bytes: int = 1_073_741_824  # 1 GB default
+
+
+# ── Path validation ───────────────────────────────────────────────────────────
+
+def _is_path_allowed(path: str, allowed_dirs: List[str]) -> bool:
+    """Return True if *path* resolves inside one of *allowed_dirs*."""
+    if not allowed_dirs:
+        return False
+    try:
+        resolved = Path(path).resolve()
+    except Exception:
+        return False
+    for d in allowed_dirs:
+        try:
+            ad = Path(d).resolve()
+            resolved.relative_to(ad)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _is_path_hidden(path: str, hidden_paths: List[str]) -> bool:
+    """Return True if *path* is equal to or descends from any hidden path."""
+    try:
+        resolved = Path(path).resolve()
+    except Exception:
+        return False
+    for hp in (hidden_paths or []):
+        try:
+            hp_resolved = Path(hp).resolve()
+            resolved.relative_to(hp_resolved)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _is_path_prevented(path: str, prevented_paths: List[str]) -> bool:
+    """Return True if *path* is protected."""
+    try:
+        resolved = Path(path).resolve()
+    except Exception:
+        return False
+    for pp in (prevented_paths or []):
+        try:
+            pp_resolved = Path(pp).resolve()
+            resolved.relative_to(pp_resolved)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _detect_binary(data: bytes) -> bool:
+    """Return True if *data* looks like binary content."""
+    return b"\x00" in data
+
+
+# ── Code tool execution ───────────────────────────────────────────────────────
+
+def _execute_code_tool(
+    name: str,
+    args: Dict[str, Any],
+    workspace_dirs: List[str],
+    hidden_paths: List[str],
+    prevented_paths: List[str],
+    run_timeout: int,
+    run_output_cap_kb: int,
+) -> str:
+    """Execute a read-only code tool and return the result string."""
+
+    if name == "readFile":
+        path = str(args.get("path", "")).strip()
+        if not path:
+            return "Error: missing path."
+        if _is_path_hidden(path, hidden_paths):
+            return f"[Hidden] The path '{path}' does not exist in the accessible file tree."
+        if not _is_path_allowed(path, workspace_dirs):
+            return f"[Out of scope] The path '{path}' is not in the loaded workspace."
+        try:
+            p = Path(path)
+            if not p.exists():
+                return f"Error: file not found: {path}"
+            raw = p.read_bytes()
+            if len(raw) > _CODE_FILE_SIZE_LIMIT or _detect_binary(raw):
+                return _CODE_SKIPPED_BINARY
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+            total = len(lines)
+            start_raw = args.get("start_line")
+            end_raw = args.get("end_line")
+            start = int(start_raw) if start_raw is not None else 1
+            end = int(end_raw) if end_raw is not None else total
+            start = max(1, min(start, total))
+            end = max(1, min(end, total))
+            if start > end:
+                return f"[lines {start}–{end} of {total} in {path}]\n(invalid range)"
+            selected = lines[start - 1:end]
+            header = f"[lines {start}–{end} of {total} in {path}]"
+            return header + "\n" + "\n".join(selected)
+        except Exception as exc:
+            return f"Error reading file: {exc}"
+
+    if name == "findFiles":
+        pattern = str(args.get("pattern", "")).strip()
+        directory = str(args.get("directory", "")).strip()
+        if not pattern or not directory:
+            return "Error: missing pattern or directory."
+        if not _is_path_allowed(directory, workspace_dirs):
+            return f"[Out of scope] The path '{directory}' is not in the loaded workspace."
+        try:
+            base = Path(directory)
+            if not base.is_dir():
+                return f"Error: not a directory: {directory}"
+            matches = []
+            for p in base.rglob("*"):
+                if fnmatch.fnmatch(p.name, pattern) or fnmatch.fnmatch(str(p.relative_to(base)), pattern):
+                    full = str(p)
+                    if not _is_path_allowed(full, workspace_dirs):
+                        continue
+                    if _is_path_hidden(full, hidden_paths):
+                        continue
+                    matches.append(full)
+            if not matches:
+                return f"findFiles '{pattern}' in {directory} → 0 files"
+            return f"findFiles '{pattern}' in {directory} → {len(matches)} file(s):\n" + "\n".join(matches)
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    if name == "listDirectory":
+        directory = str(args.get("directory", "")).strip()
+        if not directory:
+            return "Error: missing directory."
+        if not _is_path_allowed(directory, workspace_dirs):
+            return f"[Out of scope] The path '{directory}' is not in the loaded workspace."
+        try:
+            base = Path(directory)
+            if not base.is_dir():
+                return f"Error: not a directory: {directory}"
+            entries = []
+            skip_dirs = {".git", "__pycache__", "node_modules", ".venv", ".venv-kokoro"}
+            for item in sorted(base.iterdir()):
+                if item.name in skip_dirs:
+                    continue
+                full = str(item)
+                if _is_path_hidden(full, hidden_paths):
+                    continue
+                kind = "dir" if item.is_dir() else "file"
+                entries.append(f"{item.name}/ ({kind})" if item.is_dir() else f"{item.name} ({kind})")
+            if not entries:
+                return f"listDirectory {directory} → (empty)"
+            return f"listDirectory {directory} → {len(entries)} entries:\n" + "\n".join(entries)
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    if name == "searchInFile":
+        path = str(args.get("path", "")).strip()
+        query = str(args.get("query", "")).strip()
+        if not path or not query:
+            return "Error: missing path or query."
+        if _is_path_hidden(path, hidden_paths):
+            return ""  # skip silently per spec
+        if not _is_path_allowed(path, workspace_dirs):
+            return f"[Out of scope] The path '{path}' is not in the loaded workspace."
+        try:
+            p = Path(path)
+            if not p.exists():
+                return f"Error: file not found: {path}"
+            raw = p.read_bytes()
+            if len(raw) > _CODE_FILE_SIZE_LIMIT or _detect_binary(raw):
+                return _CODE_SKIPPED_BINARY
+            text_lines = raw.decode("utf-8", errors="replace").splitlines()
+            ql = query.lower()
+            match_indices = [i for i, ln in enumerate(text_lines) if ql in ln.lower()]
+            if not match_indices:
+                return f"{path}: 0 matches for '{query}'"
+            # Merge overlapping 2-line context windows
+            ctx = 2
+            windows: List[Tuple[int, int]] = []
+            for idx in match_indices:
+                ws = max(0, idx - ctx)
+                we = min(len(text_lines) - 1, idx + ctx)
+                if windows and ws <= windows[-1][1] + 1:
+                    windows[-1] = (windows[-1][0], we)
+                else:
+                    windows.append([ws, we])
+            output_lines = [f"{path}: {len(match_indices)} match{'es' if len(match_indices) != 1 else ''}"]
+            for ws, we in windows:
+                output_lines.append(f"-- line {ws + 1} --")
+                for i in range(ws, we + 1):
+                    ln = text_lines[i]
+                    marker = "   ← match" if i in match_indices else ""
+                    output_lines.append(f"{i+1:4d} | {ln}{marker}")
+            return "\n".join(output_lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    return f"Unknown read-only code tool: {name}"
+
+
+# ── History on-disk helpers ───────────────────────────────────────────────────
+
+def _load_history_config() -> None:
+    global _code_storage_limit_bytes
+    config_path = CODE_HISTORY_DIR / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            _code_storage_limit_bytes = int(cfg.get("limit_bytes", 1_073_741_824))
+        except Exception:
+            pass
+
+
+def _save_history_config() -> None:
+    CODE_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    (CODE_HISTORY_DIR / "config.json").write_text(
+        json.dumps({"limit_bytes": _code_storage_limit_bytes}, indent=2), encoding="utf-8"
+    )
+
+
+def _load_history_index() -> Dict[str, Any]:
+    index_path = CODE_HISTORY_DIR / "index.json"
+    if index_path.exists():
+        try:
+            return json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"change_groups": [], "total_bytes": 0}
+
+
+def _save_history_index(index: Dict[str, Any]) -> None:
+    CODE_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    (CODE_HISTORY_DIR / "index.json").write_text(
+        json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _path_sha(path: str) -> str:
+    return hashlib.sha256(path.encode("utf-8")).hexdigest()[:16]
+
+
+def _commit_change_group(code_session_id: str, prompt_text: str, group: Dict[str, Any]) -> str:
+    """Write a change-group to disk and update the index. Returns change_id."""
+    global _code_history_total_bytes
+    if not group.get("paths"):
+        return ""
+    change_id = datetime.utcnow().strftime("%Y%m%dT%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    group_dir = CODE_HISTORY_DIR / change_id
+    before_dir = group_dir / "before"
+    after_dir = group_dir / "after"
+    before_dir.mkdir(parents=True, exist_ok=True)
+    after_dir.mkdir(parents=True, exist_ok=True)
+
+    files_meta = []
+    total_size = 0
+    for abs_path, entry in group["paths"].items():
+        sha = _path_sha(abs_path)
+        before_content = entry.get("before_content", "")
+        # Read current (after) content
+        try:
+            p = Path(abs_path)
+            after_content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else "__did_not_exist__"
+        except Exception:
+            after_content = "__did_not_exist__"
+
+        before_bytes = before_content.encode("utf-8") if before_content != "__did_not_exist__" else b""
+        after_bytes = after_content.encode("utf-8") if after_content != "__did_not_exist__" else b""
+
+        (before_dir / f"{sha}.bin").write_bytes(before_bytes)
+        (after_dir / f"{sha}.bin").write_bytes(after_bytes)
+
+        entry_size = len(before_bytes) + len(after_bytes)
+        total_size += entry_size
+        files_meta.append({
+            "path": abs_path,
+            "sha": sha,
+            "op": entry.get("op", "write"),
+            "before_size": len(before_bytes),
+            "after_size": len(after_bytes),
+        })
+
+    metadata = {
+        "id": change_id,
+        "code_session_id": code_session_id,
+        "prompt_text": prompt_text,
+        "created_at": datetime.utcnow().isoformat(),
+        "files": files_meta,
+        "size_bytes": total_size,
+    }
+    (group_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    with _CODE_HISTORY_LOCK:
+        _code_history_total_bytes += total_size
+        if code_session_id not in _code_history:
+            _code_history[code_session_id] = []
+        _code_history[code_session_id].append(metadata)
+        # Clear redo stack on new commit
+        _code_history_redo[code_session_id] = []
+
+        # Update index
+        index = _load_history_index()
+        index.setdefault("change_groups", []).append({
+            "id": change_id,
+            "code_session_id": code_session_id,
+            "created_at": metadata["created_at"],
+            "size_bytes": total_size,
+            "prompt_text": prompt_text,
+        })
+        index["total_bytes"] = _code_history_total_bytes
+        _save_history_index(index)
+
+        # Evict if over limit
+        _evict_history_if_needed()
+
+    return change_id
+
+
+def _evict_history_if_needed() -> None:
+    """Delete oldest change-groups until under storage limit. Must be called under lock."""
+    global _code_history_total_bytes
+    index = _load_history_index()
+    groups = index.get("change_groups", [])
+    while _code_history_total_bytes > _code_storage_limit_bytes and len(groups) > 1:
+        oldest = groups.pop(0)
+        old_dir = CODE_HISTORY_DIR / oldest["id"]
+        if old_dir.exists():
+            shutil.rmtree(old_dir, ignore_errors=True)
+        _code_history_total_bytes -= oldest.get("size_bytes", 0)
+        # Remove from in-memory stacks
+        sid = oldest.get("code_session_id", "")
+        for stack in [_code_history, _code_history_redo]:
+            if sid in stack:
+                stack[sid] = [g for g in stack[sid] if g["id"] != oldest["id"]]
+    index["total_bytes"] = max(0, _code_history_total_bytes)
+    index["change_groups"] = groups
+    _save_history_index(index)
+
+
+def _read_snapshot(change_id: str, path_sha: str, direction: str) -> Optional[str]:
+    """Read before or after content from a change-group snapshot."""
+    snap_path = CODE_HISTORY_DIR / change_id / direction / f"{path_sha}.bin"
+    if not snap_path.exists():
+        return None
+    data = snap_path.read_bytes()
+    if not data:
+        return "__did_not_exist__"
+    return data.decode("utf-8", errors="replace")
+
+
+def _rebuild_history_from_disk() -> None:
+    """Rebuild in-memory history from disk on startup."""
+    global _code_history_total_bytes
+    CODE_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    _load_history_config()
+    index = _load_history_index()
+    _code_history_total_bytes = index.get("total_bytes", 0)
+    for entry in index.get("change_groups", []):
+        sid = entry.get("code_session_id", "")
+        if sid not in _code_history:
+            _code_history[sid] = []
+        _code_history[sid].append(entry)
+
+
+# Bootstrap history on module load
+try:
+    _rebuild_history_from_disk()
+except Exception:
+    pass
+
+
+# ── Code tool loop ────────────────────────────────────────────────────────────
+
+def _undo_redo_summaries(code_session_id: str) -> Tuple[Optional[str], Optional[str]]:
+    undo_stack = _code_history.get(code_session_id, [])
+    redo_stack = _code_history_redo.get(code_session_id, [])
+    undo_summary = undo_stack[-1].get("prompt_text") if undo_stack else None
+    redo_summary = redo_stack[-1].get("prompt_text") if redo_stack else None
+    return undo_summary, redo_summary
+
+
+def _run_code_tool_loop(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    model: str,
+    provider: Optional[str],
+    active_yaml_store: YamlMemoryStore,
+    search_method: str,
+    code_session_id: str,
+    workspace_dirs: List[str],
+    prevented_paths: List[str],
+    hidden_paths: List[str],
+    prompt_text: str,
+    run_timeout: int,
+    run_output_cap_kb: int,
+    max_iterations: int = 10,
+) -> Tuple[str, List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Code workspace tool loop.
+    Returns (final_text, tool_calls_made, pending_approval, auto_executed).
+    If pending_approval is not None, the loop is paused and state stored in
+    _pending_code_approvals[code_session_id].
+    """
+    tool_calls_made: List[Dict[str, Any]] = []
+    auto_executed: List[Dict[str, Any]] = []
+
+    # Ensure an in-flight group exists for this session
+    if code_session_id not in _code_inflight_groups:
+        _code_inflight_groups[code_session_id] = {"paths": {}, "prompt_text": prompt_text}
+
+    for _ in range(max_iterations):
+        data = _llm_chat_with_tools(messages, model, tools, provider)
+        raw_tool_calls = _get_tool_calls_from_response(data, provider)
+
+        if not raw_tool_calls:
+            content = _get_content_from_response(data, provider)
+            return content, tool_calls_made, None, auto_executed
+
+        pending_queue: List[Dict[str, Any]] = []
+        completed_results: List[Tuple[str, str, str]] = []
+
+        for tc in raw_tool_calls:
+            name, args, call_id = _normalize_tool_call(tc, provider)
+
+            # 1. Hidden check
+            path_arg = str(args.get("path") or args.get("directory") or args.get("cwd") or "")
+            if path_arg and name not in ("runCommand",) and _is_path_hidden(path_arg, hidden_paths):
+                result_text = f"[Hidden] The path '{path_arg}' does not exist in the accessible file tree."
+                completed_results.append((call_id, name, result_text))
+                tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
+                continue
+
+            # 2. Scope check (for code tools)
+            if name in _CODE_APPROVAL_TOOLS | _CODE_READ_ONLY_TOOLS:
+                check_path = path_arg
+                if name == "createFile":
+                    check_path = str(Path(path_arg).parent) if path_arg else ""
+                if check_path and not _is_path_allowed(check_path, workspace_dirs):
+                    result_text = f"[Out of scope] The path '{check_path}' is not in the loaded workspace."
+                    completed_results.append((call_id, name, result_text))
+                    tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
+                    continue
+
+            # 3. Prevented check
+            if name in ("writeFile", "createFile", "deleteFile") and path_arg:
+                if _is_path_prevented(path_arg, prevented_paths):
+                    result_text = f"[Edit prevented] The file '{path_arg}' has been marked as protected."
+                    completed_results.append((call_id, name, result_text))
+                    tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
+                    continue
+
+            # 4. Read-only tools → auto-execute
+            if name in _CODE_READ_ONLY_TOOLS:
+                result_text = _execute_code_tool(name, args, workspace_dirs, hidden_paths, prevented_paths, run_timeout, run_output_cap_kb)
+                completed_results.append((call_id, name, result_text))
+                tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
+                auto_executed.append({"tool_name": name, "args": args, "result_text": result_text})
+                continue
+
+            # 5. Handle base (non-code) tools inline
+            if name not in _CODE_APPROVAL_TOOLS:
+                result_text, _ = _execute_tool(name, args, active_yaml_store, search_method, code_session_id)
+                completed_results.append((call_id, name, result_text))
+                tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
+                continue
+
+            # 6. Approval-required tool → enqueue
+            summary = str(args.get("summary") or "(no reason given)")
+            path_or_cmd = path_arg or str(args.get("command") or "")
+            warnings: List[str] = []
+            if name == "runCommand":
+                cmd_str = str(args.get("command") or "")
+                for pp in (prevented_paths or []):
+                    if pp and pp in cmd_str:
+                        warnings.append(f"This command references a protected file: {pp}")
+            pending_queue.append({
+                "call_id": call_id,
+                "name": name,
+                "args": args,
+                "summary": summary,
+                "path_or_command": path_or_cmd,
+                "warnings": warnings,
+            })
+
+        if not pending_queue:
+            # All calls resolved inline; continue loop
+            _append_tool_result_messages(messages, data, raw_tool_calls, completed_results, provider)
+            continue
+
+        # Store paused state and return first pending item
+        _pending_code_approvals[code_session_id] = {
+            "messages": messages,
+            "pending_queue": pending_queue,
+            "completed_results": completed_results,
+            "batch_data": data,
+            "raw_tool_calls": raw_tool_calls,
+            "model": model,
+            "provider": provider,
+            "active_yaml_store": active_yaml_store,
+            "search_method": search_method,
+            "workspace_dirs": workspace_dirs,
+            "prevented_paths": prevented_paths,
+            "hidden_paths": hidden_paths,
+            "prompt_text": prompt_text,
+            "run_timeout": run_timeout,
+            "run_output_cap_kb": run_output_cap_kb,
+        }
+        first_pending = pending_queue[0]
+        return "", tool_calls_made, first_pending, auto_executed
+
+    content = _get_content_from_response(data, provider) if "data" in dir() else ""
+    return content, tool_calls_made, None, auto_executed
+
+
+def _apply_approved_write(
+    name: str,
+    args: Dict[str, Any],
+    code_session_id: str,
+    run_timeout: int,
+    run_output_cap_kb: int,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """
+    Execute an approved write/run tool.
+    Returns (result_text, original_content, new_content).
+    """
+    original_content: Optional[str] = None
+    new_content: Optional[str] = None
+
+    if name == "writeFile":
+        path = str(args.get("path", ""))
+        content = str(args.get("content", ""))
+        try:
+            p = Path(path)
+            original_content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            new_content = content
+            _record_inflight_before(code_session_id, path, "write", original_content)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return f"File written: {path}", original_content, new_content
+        except Exception as exc:
+            return f"Error writing file: {exc}", original_content, new_content
+
+    if name == "createFile":
+        path = str(args.get("path", ""))
+        content = str(args.get("content", ""))
+        try:
+            p = Path(path)
+            original_content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            new_content = content
+            _record_inflight_before(code_session_id, path, "create", original_content)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return f"File created: {path}", original_content, new_content
+        except Exception as exc:
+            return f"Error creating file: {exc}", original_content, new_content
+
+    if name == "deleteFile":
+        path = str(args.get("path", ""))
+        try:
+            p = Path(path)
+            original_content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            new_content = None
+            _record_inflight_before(code_session_id, path, "delete", original_content)
+            if p.exists():
+                p.unlink()
+            return f"File deleted: {path}", original_content, new_content
+        except Exception as exc:
+            return f"Error deleting file: {exc}", original_content, new_content
+
+    if name == "runCommand":
+        command = str(args.get("command", ""))
+        cwd = str(args.get("cwd", "."))
+        try:
+            cap_bytes = run_output_cap_kb * 1024
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=run_timeout,
+            )
+            stdout = result.stdout or ""
+            stderr = result.stderr or ""
+            combined_len = len(stdout.encode()) + len(stderr.encode())
+            truncated = ""
+            if combined_len > cap_bytes:
+                # Trim stdout to fit
+                stdout = stdout[:cap_bytes]
+                truncated = f"\n[Output truncated at {run_output_cap_kb}KB]"
+            result_parts = [f"$ {command}  [exit: {result.returncode}]"]
+            if stdout:
+                result_parts.append(stdout.rstrip())
+            if stderr:
+                result_parts.append(f"[stderr]\n{stderr.rstrip()}")
+            if truncated:
+                result_parts.append(truncated)
+            return "\n".join(result_parts), None, None
+        except subprocess.TimeoutExpired:
+            return f"$ {command}\n[Timed out after {run_timeout}s]", None, None
+        except Exception as exc:
+            return f"Error running command: {exc}", None, None
+
+    return f"Unknown tool: {name}", None, None
+
+
+def _record_inflight_before(
+    code_session_id: str, path: str, op: str, before_content: str
+) -> None:
+    """Record before_content for the first write to a path in this group."""
+    group = _code_inflight_groups.setdefault(code_session_id, {"paths": {}, "prompt_text": ""})
+    abs_path = str(Path(path).resolve())
+    if abs_path not in group["paths"]:
+        group["paths"][abs_path] = {"op": op, "before_content": before_content}
+    else:
+        # Update op but keep original before_content
+        group["paths"][abs_path]["op"] = op
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/code/pick-folder")
+def code_pick_folder() -> Dict[str, Any]:
+    """Open a native folder picker (via subprocess) and return the chosen path."""
+    script = str(BASE_DIR / "code_pick_folder.py")
+    python = sys.executable
+    try:
+        result = subprocess.run(
+            [python, script],
+            capture_output=True,
+            timeout=120,
+            # CREATE_NO_WINDOW prevents the child from attaching to uvicorn's console
+            # (which would crash the terminal when the subprocess exits on Windows).
+            # CREATE_NEW_PROCESS_GROUP isolates Ctrl+C/Break signals from the parent.
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        if result.returncode != 0:
+            err = result.stderr.decode("utf-8", errors="replace").strip()
+            return {"path": None, "error": err or "Picker failed"}
+        path = result.stdout.decode("utf-8").strip() or None
+        return {"path": path, "error": None}
+    except subprocess.TimeoutExpired:
+        return {"path": None, "error": "Picker timed out"}
+    except Exception as exc:
+        return {"path": None, "error": str(exc)}
+
+
+@app.get("/api/code/files")
+def code_files(paths: List[str] = Query(default=None)) -> List[Dict[str, Any]]:
+    """Return a recursive file tree for the given root paths."""
+    if not paths:
+        return []
+    skip = {".git", "__pycache__", "node_modules", ".venv", ".venv-kokoro"}
+
+    def build_tree(p: Path) -> Optional[Dict[str, Any]]:
+        if p.name in skip:
+            return None
+        if p.is_dir():
+            children = []
+            try:
+                for child in sorted(p.iterdir()):
+                    node = build_tree(child)
+                    if node:
+                        children.append(node)
+            except PermissionError:
+                pass
+            return {"path": str(p), "name": p.name, "type": "directory", "children": children}
+        return {"path": str(p), "name": p.name, "type": "file", "children": []}
+
+    result = []
+    for root in (paths or []):
+        rp = Path(root)
+        if rp.exists():
+            node = build_tree(rp)
+            if node:
+                result.append(node)
+    return result
+
+
+@app.get("/api/code/read")
+def code_read_file(path: str) -> Dict[str, Any]:
+    """Return raw file content (UTF-8) for UI use."""
+    try:
+        p = Path(path)
+        if not p.exists():
+            return {"content": None, "error": "File not found"}
+        raw = p.read_bytes()
+        if _detect_binary(raw):
+            return {"content": None, "error": "Binary file"}
+        return {"content": raw.decode("utf-8", errors="replace"), "error": None}
+    except Exception as exc:
+        return {"content": None, "error": str(exc)}
+
+
+class CodeApproveRequest(BaseModel):
+    code_session_id: str
+    call_id: str
+    approved: bool
+
+
+@app.post("/api/code/approve", response_model=ChatResponse)
+def code_approve(request: CodeApproveRequest) -> ChatResponse:
+    """Approve or deny the next pending tool call and advance the queue."""
+    sid = request.code_session_id
+    if sid not in _pending_code_approvals:
+        return ChatResponse(
+            session_id=sid,
+            assistant_text="",
+            silent_text="",
+            speak=False,
+        )
+
+    state = _pending_code_approvals[sid]
+    queue: List[Dict[str, Any]] = state["pending_queue"]
+    if not queue or queue[0]["call_id"] != request.call_id:
+        # Stale or expired
+        return ChatResponse(
+            session_id=sid,
+            assistant_text="",
+            silent_text="",
+            speak=False,
+            pending_tool_approval={"error": "approval_expired"},
+        )
+
+    item = queue.pop(0)
+    name = item["name"]
+    args = item["args"]
+    call_id = item["call_id"]
+
+    original_content: Optional[str] = None
+    new_content: Optional[str] = None
+
+    if request.approved:
+        run_timeout = state.get("run_timeout", 30)
+        run_output_cap_kb = state.get("run_output_cap_kb", 50)
+        result_text, original_content, new_content = _apply_approved_write(
+            name, args, sid, run_timeout, run_output_cap_kb
+        )
+    else:
+        path_or_cmd = item.get("path_or_command") or args.get("path") or args.get("command") or ""
+        result_text = f"[Denied by user] The action '{name}' on '{path_or_cmd}' was denied. Do not retry this action unless the user explicitly asks you to."
+
+    state["completed_results"].append((call_id, name, result_text))
+
+    if queue:
+        # More items pending — return next one
+        next_item = queue[0]
+        undo_s, redo_s = _undo_redo_summaries(sid)
+        return ChatResponse(
+            session_id=sid,
+            assistant_text="",
+            silent_text="",
+            speak=False,
+            original_content=original_content,
+            new_content=new_content,
+            pending_tool_approval={
+                "call_id": next_item["call_id"],
+                "tool_name": next_item["name"],
+                "path_or_command": next_item.get("path_or_command", ""),
+                "summary": next_item["summary"],
+                "warnings": next_item.get("warnings", []),
+            },
+            next_undo_summary=undo_s,
+            next_redo_summary=redo_s,
+        )
+
+    # Queue drained — resume the tool loop
+    messages = state["messages"]
+    batch_data = state["batch_data"]
+    raw_tool_calls = state["raw_tool_calls"]
+    completed_results = state["completed_results"]
+    provider = state["provider"]
+    _append_tool_result_messages(messages, batch_data, raw_tool_calls, completed_results, provider)
+
+    del _pending_code_approvals[sid]
+
+    # Resume
+    model = state["model"]
+    active_yaml_store = state["active_yaml_store"]
+    search_method = state["search_method"]
+    workspace_dirs = state["workspace_dirs"]
+    prevented = state["prevented_paths"]
+    hidden = state["hidden_paths"]
+    prompt_text = state["prompt_text"]
+    run_timeout = state.get("run_timeout", 30)
+    run_output_cap = state.get("run_output_cap_kb", 50)
+
+    tools = _build_tool_definitions(COMFYUI_CHECKPOINT) + CODE_TOOL_DEFINITIONS
+
+    try:
+        final_text, more_calls, next_approval, auto_exec = _run_code_tool_loop(
+            messages, tools, model, provider, active_yaml_store, search_method,
+            sid, workspace_dirs, prevented, hidden, prompt_text, run_timeout, run_output_cap,
+        )
+    except Exception as exc:
+        final_text = f"Error: {exc}"
+        next_approval = None
+        auto_exec = []
+
+    # Commit group if loop fully done
+    change_id: Optional[str] = None
+    if next_approval is None and sid in _code_inflight_groups:
+        group = _code_inflight_groups.pop(sid, {})
+        if group.get("paths"):
+            change_id = _commit_change_group(sid, prompt_text, group)
+
+    undo_s, redo_s = _undo_redo_summaries(sid)
+
+    if next_approval:
+        return ChatResponse(
+            session_id=sid,
+            assistant_text=final_text,
+            silent_text="",
+            speak=False,
+            original_content=original_content,
+            new_content=new_content,
+            pending_tool_approval={
+                "call_id": next_approval["call_id"],
+                "tool_name": next_approval["name"],
+                "path_or_command": next_approval.get("path_or_command", ""),
+                "summary": next_approval["summary"],
+                "warnings": next_approval.get("warnings", []),
+            },
+            auto_executed=auto_exec,
+            next_undo_summary=undo_s,
+            next_redo_summary=redo_s,
+        )
+
+    spoken, _ = _parse_sections(final_text)
+    return ChatResponse(
+        session_id=sid,
+        assistant_text=spoken or final_text,
+        silent_text="",
+        speak=bool(spoken or final_text),
+        original_content=original_content,
+        new_content=new_content,
+        change_id=change_id,
+        auto_executed=auto_exec,
+        next_undo_summary=undo_s,
+        next_redo_summary=redo_s,
+    )
+
+
+class CodeUndoRedoRequest(BaseModel):
+    code_session_id: str
+
+
+@app.post("/api/code/undo")
+def code_undo(request: CodeUndoRedoRequest) -> Dict[str, Any]:
+    sid = request.code_session_id
+    with _CODE_HISTORY_LOCK:
+        stack = _code_history.get(sid, [])
+        if not stack:
+            return {"ok": False, "error": "Nothing to undo"}
+        group_meta = stack.pop()
+        _code_history_redo.setdefault(sid, []).append(group_meta)
+
+    restored_files = []
+    change_id = group_meta["id"]
+    for fm in group_meta.get("files", []):
+        path = fm["path"]
+        sha = fm["sha"]
+        before_content = _read_snapshot(change_id, sha, "before")
+        if before_content is None:
+            continue
+        try:
+            p = Path(path)
+            if before_content == "__did_not_exist__":
+                if p.exists():
+                    p.unlink()
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(before_content, encoding="utf-8")
+            restored_files.append(path)
+        except Exception:
+            pass
+    return {"ok": True, "restored_files": restored_files, "change_id": change_id}
+
+
+@app.post("/api/code/redo")
+def code_redo(request: CodeUndoRedoRequest) -> Dict[str, Any]:
+    sid = request.code_session_id
+    with _CODE_HISTORY_LOCK:
+        redo_stack = _code_history_redo.get(sid, [])
+        if not redo_stack:
+            return {"ok": False, "error": "Nothing to redo"}
+        group_meta = redo_stack.pop()
+        _code_history.setdefault(sid, []).append(group_meta)
+
+    restored_files = []
+    change_id = group_meta["id"]
+    for fm in group_meta.get("files", []):
+        path = fm["path"]
+        sha = fm["sha"]
+        after_content = _read_snapshot(change_id, sha, "after")
+        if after_content is None:
+            continue
+        try:
+            p = Path(path)
+            if after_content == "__did_not_exist__":
+                if p.exists():
+                    p.unlink()
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(after_content, encoding="utf-8")
+            restored_files.append(path)
+        except Exception:
+            pass
+    return {"ok": True, "restored_files": restored_files, "change_id": change_id}
+
+
+class CodeRevertRequest(BaseModel):
+    code_session_id: str
+    change_id: str
+    path: str
+
+
+@app.post("/api/code/revert")
+def code_revert(request: CodeRevertRequest) -> Dict[str, Any]:
+    sha = _path_sha(str(Path(request.path).resolve()))
+    before_content = _read_snapshot(request.change_id, sha, "before")
+    if before_content is None:
+        return {"ok": False, "error": "Snapshot not found"}
+    try:
+        p = Path(request.path)
+        if before_content == "__did_not_exist__":
+            if p.exists():
+                p.unlink()
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(before_content, encoding="utf-8")
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@app.get("/api/code/history")
+def code_history_list(code_session_id: str) -> Dict[str, Any]:
+    stack = _code_history.get(code_session_id, [])
+    return {
+        "change_groups": [
+            {
+                "id": g["id"],
+                "prompt_text": g.get("prompt_text", ""),
+                "created_at": g.get("created_at", ""),
+                "file_count": len(g.get("files", [])),
+                "size_bytes": g.get("size_bytes", 0),
+            }
+            for g in stack
+        ]
+    }
+
+
+class CodeHistoryClearRequest(BaseModel):
+    code_session_id: Optional[str] = None
+
+
+@app.post("/api/code/history/clear")
+def code_history_clear(request: CodeHistoryClearRequest) -> Dict[str, Any]:
+    global _code_history_total_bytes
+    with _CODE_HISTORY_LOCK:
+        index = _load_history_index()
+        groups = index.get("change_groups", [])
+        to_delete = [g for g in groups if not request.code_session_id or g.get("code_session_id") == request.code_session_id]
+        for g in to_delete:
+            d = CODE_HISTORY_DIR / g["id"]
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+        remaining = [g for g in groups if g not in to_delete]
+        index["change_groups"] = remaining
+        _code_history_total_bytes = sum(g.get("size_bytes", 0) for g in remaining)
+        index["total_bytes"] = _code_history_total_bytes
+        _save_history_index(index)
+        if request.code_session_id:
+            _code_history.pop(request.code_session_id, None)
+            _code_history_redo.pop(request.code_session_id, None)
+        else:
+            _code_history.clear()
+            _code_history_redo.clear()
+    return {"ok": True}
+
+
+class CodeHistoryLimitRequest(BaseModel):
+    limit_bytes: int
+
+
+@app.post("/api/code/history/limit")
+def code_history_limit(request: CodeHistoryLimitRequest) -> Dict[str, Any]:
+    global _code_storage_limit_bytes
+    with _CODE_HISTORY_LOCK:
+        _code_storage_limit_bytes = max(1024 * 1024, request.limit_bytes)
+        _save_history_config()
+        _evict_history_if_needed()
+    return {"ok": True, "limit_bytes": _code_storage_limit_bytes, "total_bytes": _code_history_total_bytes}
+
+
+@app.get("/api/code/undo-redo-state")
+def code_undo_redo_state(code_session_id: str) -> Dict[str, Any]:
+    undo_s, redo_s = _undo_redo_summaries(code_session_id)
+    return {"next_undo_summary": undo_s, "next_redo_summary": redo_s}
+

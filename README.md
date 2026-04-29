@@ -9,6 +9,7 @@ A local-first voice chat web UI that sends transcribed speech to an Ollama LLM (
 - Ollama running locally
 - Git (for ComfyUI setup)
 - A browser that supports the Web Speech API (Chrome works well)
+- Node.js 18+ and npm (for the React-based Code Workspace frontend)
 
 ## Setup
 
@@ -18,7 +19,17 @@ Creates `.venv` with Python 3.12, installs backend dependencies:
 .\run_setup_main.ps1
 ```
 
-### 2. Kokoro TTS (Python 3.11, optional)
+### 2. Frontend (Node.js — required for Code Workspace)
+Install frontend dependencies and do an initial build:
+```powershell
+cd frontend
+npm install
+npm run build
+cd ..
+```
+This produces `frontend-dist/` which FastAPI serves as static assets.
+
+### 3. Kokoro TTS (Python 3.11, optional)
 Creates `.venv-kokoro` with Python 3.11, installs PyTorch + Kokoro TTS:
 ```powershell
 .\run_setup_kokoroTTS.ps1
@@ -60,7 +71,14 @@ or
 .run_webui.ps1
 ```
 
-2. Kokoro Service
+2. Frontend Watch (open a second terminal when developing React components)
+```powershell
+.\run_watch_frontend.bat
+```
+Vite watches `frontend/src/` and rebuilds `frontend-dist/` automatically on save.
+Refresh the browser after each rebuild. Not needed when only editing Python or `app.js`.
+
+3. Kokoro Service
 ```powershell
 cd .\backend\
 .\.venv-kokoro\Scripts\activate

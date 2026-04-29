@@ -1,4 +1,4 @@
-const micStatus = document.getElementById("micStatus");
+﻿const micStatus = document.getElementById("micStatus");
 const sessionStatus = document.getElementById("sessionStatus");
 const chatLog = document.getElementById("chatLog");
 const interimText = document.getElementById("interimText");
@@ -467,7 +467,7 @@ function formatSessionMeta(entry) {
     return entry.id.slice(0, 8);
   }
   const stamp = new Date(updatedAt).toLocaleString();
-  return `${entry.id.slice(0, 8)} • ${stamp}`;
+  return `${entry.id.slice(0, 8)} â€¢ ${stamp}`;
 }
 
 function renameSession(id, name) {
@@ -801,7 +801,7 @@ function saveChatMessage(role, text, imageDataUrl, personalityName) {
   try {
     localStorage.setItem(key, JSON.stringify(history));
   } catch (_) {
-    // Storage quota exceeded — retry without image data so at least the text survives
+    // Storage quota exceeded â€” retry without image data so at least the text survives
     if (imageDataUrl) {
       const fallback = history.map(e => e === entry ? { role: e.role, text: e.text } : e);
       try { localStorage.setItem(key, JSON.stringify(fallback)); } catch (_2) {}
@@ -1535,7 +1535,7 @@ function addToImageGroup(url) {
   if (_generatingStatusItem) {
     const label = _generatingStatusItem.querySelector("span:not(.gen-spinner)");
     if (label && (_imageGenTotal === 0 || count >= _imageGenTotal)) {
-      label.textContent = "Composing reply…";
+      label.textContent = "Composing replyâ€¦";
     }
   }
 
@@ -1712,12 +1712,12 @@ function flushSpeechBuffer(force) {
 
     if (working.length > 200) {
       // Only cut at a comma or semicolon to preserve sentence flow
-      const commaMatch = working.match(/^[\s\S]*?[,;—]/);
+      const commaMatch = working.match(/^[\s\S]*?[,;â€”]/);
       if (commaMatch && commaMatch[0].length <= 200) {
         chunks.push(commaMatch[0].trim());
         working = working.slice(commaMatch[0].length).trimStart();
       } else {
-        // No comma found within 200 chars — hold until a sentence boundary arrives,
+        // No comma found within 200 chars â€” hold until a sentence boundary arrives,
         // unless we're forcing (end of stream), in which case flush the whole thing.
         if (force) {
           chunks.push(working.trim());
@@ -2117,7 +2117,7 @@ async function sendText(text, options = {}) {
     }
   } catch (error) {
     if (error.name === "AbortError") {
-      // User cancelled — already cleaned up in cancelActiveRequest
+      // User cancelled â€” already cleaned up in cancelActiveRequest
       interimText.textContent = "";
     } else {
       await sendTextNonStream(payload, shouldClearAttachment, trimmed);
@@ -2475,7 +2475,7 @@ function closeSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = true;
 }
 
-// ── Service toast notifications ───────────────────────────────────────────
+// â”€â”€ Service toast notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let kokoroJustStarted = false;
 let comfyuiJustStarted = false;
@@ -2495,14 +2495,14 @@ function updateServiceToasts() {
     const dot = document.createElement("span");
     dot.className = `service-toast-dot ${state}`;
     const text = document.createElement("span");
-    text.textContent = state === "started" ? `${label} started` : `${label} ${state}…`;
+    text.textContent = state === "started" ? `${label} started` : `${label} ${state}â€¦`;
     pill.appendChild(dot);
     pill.appendChild(text);
     serviceToasts.appendChild(pill);
   });
 }
 
-// ── Kokoro TTS service management ───────────────────────────────────────────
+// â”€â”€ Kokoro TTS service management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let kokoroServiceRunning = false;
 let kokoroServiceAvailable = false;
@@ -2523,7 +2523,7 @@ function updateKokoroUI() {
   } else if (kokoroServiceBusy) {
     kokoroStatusDot.classList.add("stopped");
     hdrKokoroDot?.classList.add("stopped");
-    kokoroStatusText.textContent = kokoroServiceRunning ? "Stopping…" : "Starting…";
+    kokoroStatusText.textContent = kokoroServiceRunning ? "Stoppingâ€¦" : "Startingâ€¦";
     kokoroToggleBtn.textContent = kokoroServiceRunning ? "Stop Service" : "Launch";
     kokoroToggleBtn.disabled = true;
   } else if (kokoroServiceRunning) {
@@ -2572,7 +2572,7 @@ async function toggleKokoroService() {
       }
     }
   } catch {
-    // ignore – status check below will update UI
+    // ignore â€“ status check below will update UI
   }
 
   const wasStarting = !kokoroServiceRunning;
@@ -2591,7 +2591,7 @@ if (kokoroToggleBtn) {
 
 checkKokoroStatus();
 
-// ── ComfyUI image service management ────────────────────────────────────────
+// â”€â”€ ComfyUI image service management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let comfyuiServiceRunning = false;
 let comfyuiServiceAvailable = false;
@@ -2614,7 +2614,7 @@ function updateComfyUIUI() {
   } else if (comfyuiServiceBusy) {
     comfyuiStatusDot.classList.add("stopped");
     hdrComfyuiDot?.classList.add("stopped");
-    comfyuiStatusText.textContent = comfyuiServiceRunning ? "Stopping…" : "Starting…";
+    comfyuiStatusText.textContent = comfyuiServiceRunning ? "Stoppingâ€¦" : "Startingâ€¦";
     comfyuiToggleBtn.textContent = comfyuiServiceRunning ? "Stop Service" : "Launch";
     comfyuiToggleBtn.disabled = true;
   } else if (comfyuiServiceRunning) {
@@ -2723,7 +2723,7 @@ function renderComfyUIResolutions() {
     inp.addEventListener("input", () => { comfyuiResolutions[i] = inp.value.trim(); });
     const del = document.createElement("button");
     del.className = "small";
-    del.textContent = "×";
+    del.textContent = "Ã—";
     del.addEventListener("click", () => {
       comfyuiResolutions.splice(i, 1);
       renderComfyUIResolutions();
@@ -2785,7 +2785,7 @@ if (comfyuiValidateWorkflowBtn) {
       comfyuiValidateResult.style.color = "var(--muted)";
       return;
     }
-    comfyuiValidateResult.textContent = "Validating…";
+    comfyuiValidateResult.textContent = "Validatingâ€¦";
     comfyuiValidateResult.style.color = "var(--muted)";
     try {
       const res = await fetch("/api/comfyui/validate-workflow", {
@@ -2798,10 +2798,10 @@ if (comfyuiValidateWorkflowBtn) {
         comfyuiValidateResult.textContent = data.error;
         comfyuiValidateResult.style.color = "#f0a020";
       } else if (data.valid) {
-        comfyuiValidateResult.textContent = "✅ All nodes available";
+        comfyuiValidateResult.textContent = "âœ… All nodes available";
         comfyuiValidateResult.style.color = "#4caf50";
       } else {
-        comfyuiValidateResult.textContent = `❌ Missing nodes: ${data.missing_nodes.join(", ")}`;
+        comfyuiValidateResult.textContent = `âŒ Missing nodes: ${data.missing_nodes.join(", ")}`;
         comfyuiValidateResult.style.color = "#c44";
       }
     } catch {
@@ -2912,7 +2912,7 @@ if (ragTopKInput) {
   });
 }
 
-// ── Personality system ──────────────────────────────────────────────────────
+// â”€â”€ Personality system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function loadPersonalities() {
   try {
@@ -3005,7 +3005,7 @@ function peUpdateTtsProviderUI() {
 
 function populatePeVoiceSelect(selectedVoice) {
   if (!peTtsVoiceSelect) return;
-  peTtsVoiceSelect.innerHTML = '<option value="">— none —</option>';
+  peTtsVoiceSelect.innerHTML = '<option value="">â€” none â€”</option>';
   if (peTtsProvider === "kokoro") {
     kokoroVoices.forEach((v) => {
       const opt = document.createElement("option");
@@ -3419,7 +3419,7 @@ const SLASH_COMMANDS = [
       try {
         const r = await fetch("/api/cleanvram", { method: "POST" });
         if (r.ok) {
-          addChat("assistant", "VRAM cleared — all models unloaded.");
+          addChat("assistant", "VRAM cleared â€” all models unloaded.");
         } else {
           addChat("assistant", `Error: ${r.status} ${r.statusText}`);
         }
@@ -3430,7 +3430,7 @@ const SLASH_COMMANDS = [
   },
   {
     name: "/generateimage",
-    desc: 'Generate an image — /generateimage "prompt" [--res 1024x1024] [--raw]',
+    desc: 'Generate an image â€” /generateimage "prompt" [--res 1024x1024] [--raw]',
     requiresInput: true,
     async execute(args = "") {
       args = args.trim();
@@ -3731,16 +3731,26 @@ if (sessionPanel && isSessionPanelOpen) {
 (function initWorkspaceTabs() {
   const tabs = document.querySelectorAll(".workspace-tab[data-workspace]");
   const workspaces = document.querySelectorAll(".workspace[data-workspace]");
-  tabs.forEach(tab => {
-    tab.addEventListener("click", () => {
-      const target = tab.dataset.workspace;
-      tabs.forEach(t => {
-        t.classList.toggle("active", t.dataset.workspace === target);
-        t.setAttribute("aria-pressed", String(t.dataset.workspace === target));
-      });
-      workspaces.forEach(w => { w.hidden = w.dataset.workspace !== target; });
+
+  function activate(target) {
+    tabs.forEach(t => {
+      t.classList.toggle("active", t.dataset.workspace === target);
+      t.setAttribute("aria-pressed", String(t.dataset.workspace === target));
     });
+    workspaces.forEach(w => { w.hidden = w.dataset.workspace !== target; });
+    localStorage.setItem("activeWorkspace", target);
+  }
+
+  tabs.forEach(tab => {
+    tab.addEventListener("click", () => activate(tab.dataset.workspace));
   });
+
+  // Restore last active workspace, defaulting to the first tab
+  const saved = localStorage.getItem("activeWorkspace");
+  const initial = saved && [...tabs].some(t => t.dataset.workspace === saved)
+    ? saved
+    : tabs[0]?.dataset.workspace;
+  if (initial) activate(initial);
 })();
 
 // Interval controls
@@ -3791,7 +3801,7 @@ if (screenshotIntervalInput) {
   });
 }
 
-// ── VRAM indicator ──────────────────────────────────────────────────────────
+// â”€â”€ VRAM indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function updateVramIndicator() {
   try {
@@ -3799,7 +3809,7 @@ async function updateVramIndicator() {
     if (!res.ok) return;
     const { used_gb, total_gb } = await res.json();
     if (used_gb === null || total_gb === null || total_gb === 0) {
-      if (thinkingVramLabel) thinkingVramLabel.textContent = "VRAM —";
+      if (thinkingVramLabel) thinkingVramLabel.textContent = "VRAM â€”";
       return;
     }
     const pct = used_gb / total_gb;
@@ -3864,7 +3874,7 @@ setInterval(updateVramIndicator, 5000);
     const sh = stage.clientHeight;
     const iw = img.naturalWidth  || img.width;
     const ih = img.naturalHeight || img.height;
-    // Fit to 90% of the stage, never upscale beyond 1×
+    // Fit to 90% of the stage, never upscale beyond 1Ã—
     scale = Math.min(1, sw * 0.9 / iw, sh * 0.9 / ih);
     img.style.width  = iw + 'px';
     img.style.height = ih + 'px';
@@ -4028,7 +4038,7 @@ setInterval(updateVramIndicator, 5000);
     stage.classList.remove('panning');
   });
 
-  // Click image → zoom in at click point; click bare stage → close
+  // Click image â†’ zoom in at click point; click bare stage â†’ close
   stage.addEventListener('click', e => {
     if (didDrag) { didDrag = false; return; }
     if (e.target === img) {
@@ -4063,7 +4073,7 @@ setInterval(updateVramIndicator, 5000);
   let ctxTarget = null;   // the DOM element being acted on
   let ctxRole   = null;   // 'user' | 'assistant'
 
-  // ── helpers ────────────────────────────────────────────────────────────────
+  // â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function getLastRealItem(role) {
     // Last non-status chat-item with the given role
@@ -4098,7 +4108,7 @@ setInterval(updateVramIndicator, 5000);
     removeLastFromHistory('user');
   }
 
-  // ── context menu display ───────────────────────────────────────────────────
+  // â”€â”€ context menu display â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   function hideMenu() {
     ctxMenu.hidden = true;
@@ -4144,7 +4154,7 @@ setInterval(updateVramIndicator, 5000);
     ctxMenu.style.top  = Math.min(y, vh - mh - 8) + 'px';
   }
 
-  // ── actions ────────────────────────────────────────────────────────────────
+  // â”€â”€ actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   async function actionRegenerateAssistant() {
     const prompt = lastUserPrompt;
@@ -4279,7 +4289,7 @@ setInterval(updateVramIndicator, 5000);
     });
   }
 
-  // ── right-click handler ────────────────────────────────────────────────────
+  // â”€â”€ right-click handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   chatLog.addEventListener('contextmenu', e => {
     const item = e.target.closest('.chat-item');
@@ -4302,20 +4312,20 @@ setInterval(updateVramIndicator, 5000);
 
     const menuItems = isAssistant
       ? [
-          { label: '↺  Regenerate response', action: actionRegenerateAssistant },
+          { label: 'â†º  Regenerate response', action: actionRegenerateAssistant },
           'sep',
-          { label: '✕  Delete response', cls: 'danger', action: actionDeleteAssistant },
+          { label: 'âœ•  Delete response', cls: 'danger', action: actionDeleteAssistant },
         ]
       : [
-          { label: '✎  Edit & resend', action: () => { actionEditUser(item); } },
+          { label: 'âœŽ  Edit & resend', action: () => { actionEditUser(item); } },
           'sep',
-          { label: '✕  Delete message', cls: 'danger', action: actionDeleteExchange },
+          { label: 'âœ•  Delete message', cls: 'danger', action: actionDeleteExchange },
         ];
 
     showMenu(e.clientX, e.clientY, menuItems);
   });
 
-  // ── close on outside click / scroll / Escape ───────────────────────────────
+  // â”€â”€ close on outside click / scroll / Escape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   document.addEventListener('click', e => {
     if (!ctxMenu.hidden && !ctxMenu.contains(e.target)) hideMenu();

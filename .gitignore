@@ -26,3 +26,9 @@ comfyui_settings.json
 .claude/
 
 IDEAS.md
+
+# Node / npm
+frontend/node_modules/
+frontend-dist/
+frontend/src/components/CodeWorkspace/CodeWorkspace.css.map
+*.map
