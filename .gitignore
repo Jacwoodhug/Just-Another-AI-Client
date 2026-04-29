@@ -10,15 +10,16 @@ venv/
 .venv/
 .venv-kokoro/
 env/
-python\ 3.12/
 
 # DB
 backend/*.sqlite3
 backend/memories*.yaml
 
+# User data
 ComfyUI/
 generated_images/
 comfyui_settings.json
+backend/code_history
 
 # IDEs
 .vscode/
