@@ -36,13 +36,21 @@ function TreeNode({ node, depth, selected, prevented, hidden, onToggleSelected, 
     <>
       <div
         className={cls}
-        style={{ paddingLeft: 8 + depth * 14 }}
+        style={{
+          paddingLeft: 8 + depth * 14,
+          borderLeft: (!isDir && selected.has(path)) ? '2px solid var(--accent)' : '2px solid transparent',
+        }}
         data-path={path}
         onClick={handleClick}
         onContextMenu={handleContextMenu}
       >
         {hidden.has(path) && <span className="code-hidden-icon">⊘ </span>}
         {isDir && <span className="code-tree-arrow">{open ? '▼ ' : '▶ '}</span>}
+        {!isDir && (
+          <div className={'code-tree-checkbox' + (selected.has(path) ? ' checked' : '')}>
+            {selected.has(path) && <span className="code-tree-checkbox-check">✓</span>}
+          </div>
+        )}
         <span>{node.name}{isDir ? '/' : ''}</span>
       </div>
 
@@ -155,7 +163,7 @@ export default function FileTree({ treeData, dirs, selected, prevented, hidden, 
 
       <div className="code-tree-footer">
         <span className="code-tree-file-count" id="codeFileCount">
-          {fileCount} file{fileCount !== 1 ? 's' : ''}
+          {selected.size} file{selected.size !== 1 ? 's' : ''} selected
         </span>
         <button
           className="hdr-icon-btn code-tree-settings-btn"

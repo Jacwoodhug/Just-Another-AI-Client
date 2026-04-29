@@ -18,7 +18,7 @@ export default defineConfig({
         entryFileNames: 'assets/code-workspace.js',
         assetFileNames: 'assets/[name][extname]',
         format: 'iife',
-        name: 'CodeWorkspaceBundle',
+        name: 'AIVCBundle',
       },
     },
     sourcemap: true,

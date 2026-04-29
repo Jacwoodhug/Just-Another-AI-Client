@@ -10,6 +10,7 @@
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
   <script type="text/babel" src="ai-vc-panels.jsx"></script>
   <script type="text/babel" src="ai-vc-workspaces.jsx"></script>
+  <script type="text/babel" src="ai-vc-image-workspace.jsx"></script>
   <style>
     :root {
       --bg:       #14100b;
@@ -152,15 +153,7 @@ function App() {
         <div style={{ flex: 1, display: "flex", minWidth: 0, overflow: "hidden" }}>
           {workspace === "chat"  && <ChatWorkspace />}
           {workspace === "code"  && <CodeWorkspace />}
-          {workspace === "image" && (
-            <div style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-              flexDirection: "column", gap: 12,
-            }}>
-              <span style={{ fontFamily: "var(--font)", fontSize: 14, color: "var(--muted)" }}>Image workspace</span>
-              <span style={{ fontFamily: "var(--font)", fontSize: 12, color: "rgba(184,168,143,0.5)" }}>ComfyUI integration coming soon</span>
-            </div>
-          )}
+          {workspace === "image" && <ImageWorkspace />}
         </div>
 
         <ThinkingPanel open={thinkingOpen} />

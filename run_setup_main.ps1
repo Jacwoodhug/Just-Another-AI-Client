@@ -85,4 +85,17 @@ Write-Host "Installing requirements from $reqs ..."
 pip install -r $reqs
 
 Write-Host ""
+Write-Host "=== Frontend setup ===" -ForegroundColor Cyan
+$frontend = Join-Path $root "frontend"
+if (Test-Path (Join-Path $frontend "package.json")) {
+    Write-Host "Installing frontend npm packages ..."
+    Push-Location $frontend
+    npm install
+    Pop-Location
+    Write-Host "Frontend packages installed." -ForegroundColor Green
+} else {
+    Write-Host "No frontend/package.json found, skipping." -ForegroundColor Yellow
+}
+
+Write-Host ""
 Write-Host "Done!  Activate with:  backend\.venv\Scripts\Activate.ps1" -ForegroundColor Green

@@ -8,9 +8,11 @@ import './CodeWorkspace.css';
 export default function CodeWorkspace() {
   const ws = useCodeWorkspace();
   const [showSettings, setShowSettings] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [slashItems, setSlashItems] = useState([]);
+  const [slashActive, setSlashActive] = useState(0);
   const inputRef = useRef(null);
-  const micRef = useRef(null);
-  let _cmicRec = null, _cmicActive = false;
+  const recognitionRef = useRef(null);
 
   // Fetch undo/redo state on mount
   useEffect(() => { ws.fetchUndoRedo(); }, []);
@@ -30,35 +32,106 @@ export default function CodeWorkspace() {
   function handleSend() {
     const text = inputRef.current?.value || '';
     if (!text.trim()) return;
-    ws.sendMessage(text);
     if (inputRef.current) inputRef.current.value = '';
+    setSlashItems([]);
+    // Route slash commands through the chat bridge
+    if (text.trim().startsWith('/')) {
+      const handled = window.chatBridge?.tryExecuteSlashCommand?.(text.trim());
+      if (handled) return;
+    }
+    ws.sendMessage(text);
+  }
+
+  function handleInput() {
+    const val = inputRef.current?.value || '';
+    if (!val.startsWith('/')) {
+      setSlashItems([]);
+      return;
+    }
+    const cmds = window.chatBridge?.getSlashCommands?.() || [];
+    const query = val.toLowerCase();
+    const filtered = cmds.filter(c => c.name.startsWith(query));
+    setSlashItems(filtered);
+    setSlashActive(filtered.length > 0 ? 0 : -1);
+  }
+
+  function applyCodeSlashCmd(cmd) {
+    setSlashItems([]);
+    if (cmd.requiresInput) {
+      if (inputRef.current) { inputRef.current.value = cmd.name + ' '; inputRef.current.focus(); }
+    } else {
+      if (inputRef.current) inputRef.current.value = '';
+      window.chatBridge?.sendText?.(cmd.name);
+    }
   }
 
   function handleKeyDown(e) {
+    if (slashItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashActive(i => (i + 1) % slashItems.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashActive(i => (i - 1 + slashItems.length) % slashItems.length);
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const cmd = slashItems[slashActive >= 0 ? slashActive : 0];
+        if (cmd) { setSlashItems([]); if (inputRef.current) { inputRef.current.value = cmd.name + ' '; inputRef.current.focus(); } }
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && slashActive >= 0) {
+        e.preventDefault();
+        const cmd = slashItems[slashActive] || slashItems[0];
+        if (cmd) applyCodeSlashCmd(cmd);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setSlashItems([]);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  }
+
+  function handleInputBlur() {
+    setTimeout(() => setSlashItems([]), 150);
   }
 
   function handleApprove(callId, pathOrCmd) { ws.sendApproval(callId, true, pathOrCmd); }
   function handleDeny(callId)               { ws.sendApproval(callId, false, ''); }
 
-  function handleMicClick() {
+  function handleMicMouseDown() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) return;
-    if (!_cmicRec) {
-      _cmicRec = new SR();
-      _cmicRec.continuous = false;
-      _cmicRec.interimResults = false;
-      _cmicRec.lang = 'en-US';
-      _cmicRec.onstart = () => { micRef.current?.classList.add('active'); };
-      _cmicRec.onresult = e => {
-        const t = e.results[0][0].transcript.trim();
-        if (inputRef.current) inputRef.current.value = (inputRef.current.value ? inputRef.current.value + ' ' : '') + t;
-      };
-      _cmicRec.onend = () => { _cmicActive = false; micRef.current?.classList.remove('active'); };
-      _cmicRec.onerror = () => { _cmicActive = false; micRef.current?.classList.remove('active'); };
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.lang = 'en-US';
+    rec.onresult = e => {
+      const t = Array.from(e.results)
+        .slice(e.resultIndex)
+        .map(r => r[0].transcript)
+        .join('')
+        .trim();
+      if (t && inputRef.current) {
+        inputRef.current.value = (inputRef.current.value ? inputRef.current.value + ' ' : '') + t;
+      }
+    };
+    rec.onend = () => { setRecording(false); recognitionRef.current = null; };
+    rec.onerror = () => { setRecording(false); recognitionRef.current = null; };
+    recognitionRef.current = rec;
+    try { rec.start(); setRecording(true); } catch {}
+  }
+
+  function handleMicMouseUp() {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
     }
-    if (_cmicActive) { _cmicRec.stop(); _cmicActive = false; }
-    else { try { _cmicRec.start(); _cmicActive = true; } catch {} }
+    setRecording(false);
   }
 
   return (
@@ -109,16 +182,37 @@ export default function CodeWorkspace() {
 
         {/* Composer */}
         <div className="code-composer" id="codeComposer">
+          {/* Slash command menu */}
+          {slashItems.length > 0 && (
+            <div className="slash-menu" role="listbox" aria-label="Slash commands">
+              <ul className="slash-list">
+                {slashItems.map((cmd, i) => (
+                  <li
+                    key={cmd.name}
+                    className={'slash-item' + (i === slashActive ? ' active' : '')}
+                    role="option"
+                    aria-selected={i === slashActive}
+                    onMouseDown={e => { e.preventDefault(); applyCodeSlashCmd(cmd); }}
+                  >
+                    <span className="slash-item-name">{cmd.name}</span>
+                    <span className="slash-item-desc">{cmd.desc}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="code-composer-row">
             <button
-              ref={micRef}
-              className="composer-mic code-composer-mic"
+              className={'composer-mic code-composer-mic' + (recording ? ' active' : '')}
               id="codeMicBtn"
               type="button"
-              aria-label="Toggle microphone"
-              title="Click to dictate"
-              onClick={handleMicClick}
+              aria-label="Hold to dictate"
+              title="Hold to dictate"
+              onMouseDown={handleMicMouseDown}
+              onMouseUp={handleMicMouseUp}
+              onMouseLeave={handleMicMouseUp}
             >
+              {recording && <span className="code-mic-blink-dot" />}
               <svg width="13" height="16" viewBox="0 0 13 16" fill="none">
                 <rect x="3.5" y="0.5" width="6" height="9" rx="3" stroke="currentColor" strokeWidth="1.4"/>
                 <path d="M1 8c0 3.03 2.46 5.5 5.5 5.5S12 11.03 12 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
@@ -127,11 +221,13 @@ export default function CodeWorkspace() {
             </button>
             <textarea
               ref={inputRef}
-              className="code-composer-input"
+              className={recording ? 'code-composer-input recording' : 'code-composer-input'}
               id="codeInput"
-              placeholder="Ask AI to edit files…"
+              placeholder={recording ? 'Recording… release to stop' : 'Ask AI to edit files…'}
               rows={1}
               onKeyDown={handleKeyDown}
+              onInput={handleInput}
+              onBlur={handleInputBlur}
             />
             <button
               className="composer-send primary code-run-btn"

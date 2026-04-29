@@ -19,7 +19,7 @@ backend/memories*.yaml
 ComfyUI/
 generated_images/
 comfyui_settings.json
-backend/code_history
+backend/code_history/
 
 # IDEs
 .vscode/

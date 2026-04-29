@@ -276,6 +276,145 @@ All existing JavaScript handlers in `app.js` must remain wired up. The HTML rest
 
 ---
 
+---
+
+## Image Workspace
+
+### Layout
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ HEADER (workspace tabs: Chat | Code | Image)                 │
+├──────────┬───────────────────────────┬────────────────────────┤
+│ Library  │   Masonry Grid            │  Agent Chat            │
+│ Nav      │   (CSS columns, 3 col)    │  (260px, always open)  │
+│ (180px)  │                           │                        │
+├──────────┴───────────────────────────┴────────────────────────┤
+│  BOTTOM BAR: [Prompt input] [Enhance] [Negative▾] [More▾] [Generate ×N] │
+└──────────────────────────────────────────────────────────────┘
+```
+
+The `ImageWorkspace` component must be wrapped in a `display:flex; flex-direction:column; flex:1` container so the bottom bar stacks below the main row.
+
+### Library Nav (left, 180px)
+
+- **All Images** — shows all, sorted newest first
+- **★ Starred** — filtered view, star toggled per image
+- **Folders** — user-created, `+` button opens inline name input (Enter to confirm, Escape to cancel)
+- Active view: `border-left: 2px solid var(--accent)`, `background: rgba(212,87,42,0.1)`
+- Footer: total image count
+
+### Masonry Grid (center, flex:1)
+
+- CSS `columns: 3 180px; column-gap: 10px`
+- Each card: `break-inside: avoid; margin-bottom: 10px; border-radius: 8px; overflow: hidden`
+- Hover state: `transform: scale(1.015)`, border lightens, overlays appear
+- **Star button** (top-left, 26×26px): visible on hover or when starred. Accent background when starred.
+- **Edit shortcut** (top-right): visible on hover, opens Edit modal
+- **Bottom gradient overlay**: prompt snippet (2 lines) + seed + resolution. Visible on hover.
+- `draggable` — `dragstart` sets `dataTransfer` with image ID for drag-to-chat
+- **Click** → opens Detail Modal
+
+### Detail Modal (click on image)
+
+Centered overlay, `max-width: 80vw`, two columns:
+- **Left**: placeholder/image display
+- **Right (280px)**: metadata panel
+  - Sections: Prompt, Negative Prompt (if set), Generation (seed, resolution, model, timestamp)
+  - Actions row: Star · Edit · Delete
+  - Section labels: 10px, weight 700, `color: var(--accent)`, uppercase
+
+### Edit Modal (split view, fixed inset)
+
+Three columns:
+1. **Original** (flex:1) — image + seed/resolution/model caption
+2. **Controls** (320px) — AI analysis spinner (1.2s) → pre-filled prompt textarea + negative prompt textarea + Enhance toggle + Regenerate button
+3. **Result** (flex:1) — spinner while generating → result image + seed + "Save to library" button
+
+### Bottom Generation Bar
+
+Always visible, `border-top: 1px solid var(--stroke)`, `padding: 10px 16px`.
+
+**Main row** (always visible):
+- Prompt `<input>` — `flex:1`, `font-size:14px`, `border-radius:10px`
+- **Enhance toggle** — pill with `MiniToggle` + label. Active: accent tint.
+- **Negative button** — expands negative prompt field above the row when active. Shows `●` dot if a value is set.
+- **More ▼ button** — expands options row above. Shows `●` if any non-default values (aspect ≠ 1:1, batch > 1, seed set).
+- **Generate button** — primary, `height:42px`. Label is "Generate" or "Generate ×N" when batch > 1.
+
+**Expanded options row** (shown above main row when open):
+- Negative prompt: full-width text input
+- Aspect ratio: pill button group — `1:1 | 3:2 | 2:3 | 16:9 | 9:16 | Custom`. Custom shows a text input for `WxH`.
+- Seed: text input (disabled when unlocked) + Lock `MiniToggle` + Randomize `⟳` button. When locked + batch > 1, show note: "Seed varies per batch item" — each batch item gets `baseSeed + batchIndex`.
+- Batch count: range slider 1–8, current value shown inline.
+
+**Queue pills** (shown above main row when queue is non-empty):
+- Each pill: prompt snippet (truncated) + progress bar (3px, accent color) + status label + ✕ cancel
+- `min-width:180px; max-width:240px; flex-shrink:0`
+
+### Agent Chat (right, 260px, always open)
+
+Same structure as Chat workspace but without mic/secondary controls. Full message history, `<input>` + Send button at bottom. Messages use same bubble styles.
+
+### State
+
+```
+images:        Image[]          // { id, prompt, negPrompt, seed, resolution, model, timestamp, folder, starred, w, h }
+folders:       string[]         // user-created folder names
+activeFolder:  string           // "all" | folder name
+showStarred:   boolean
+detailImg:     Image | null     // currently open in detail modal
+editImg:       Image | null     // currently open in edit modal
+prompt:        string
+negPrompt:     string
+enhance:       boolean          // default true
+seed:          string
+lockSeed:      boolean
+batchCount:    number           // 1–8
+aspectRatio:   { label, res }   // res is null for Custom
+customRes:     string           // used when aspectRatio.label === "Custom"
+negOpen:       boolean          // negative prompt row expanded
+moreOpen:      boolean          // more options row expanded
+queue:         QueueItem[]      // { id, prompt, status, progress }
+chatMessages:  ChatMessage[]
+chatInput:     string
+```
+
+### Batch Generation
+
+When generating with `batchCount > 1`:
+- If `lockSeed` is true: each image gets `seed + batchIndex` to ensure variation
+- If `lockSeed` is false: each image gets a random seed
+- All batch images are added to the library when the queue item completes
+
+### Image Metadata to Store
+
+When saving generated images, store alongside the data URL:
+```json
+{
+  "prompt": "original or enhanced prompt sent to ComfyUI",
+  "negPrompt": "negative prompt",
+  "seed": 42190,
+  "resolution": "1024x1024",
+  "model": "dreamshaper_8",
+  "timestamp": "ISO string",
+  "folder": "root",
+  "starred": false
+}
+```
+
+This should be stored in the session's image group entry so the edit flow can pre-fill the prompt and the detail panel can display full metadata.
+
+### Edit Flow (backend)
+
+1. User clicks Edit → frontend calls `/api/describe-image` with the image data URL
+2. Backend asks the LLM to describe the image as a generation prompt
+3. Response pre-fills the prompt textarea
+4. User edits prompt → clicks Regenerate → calls `/api/generateimage` as normal
+5. Result can be saved as a new image in the library
+
+---
+
 ## Files in This Bundle
 
 | File | Purpose |
@@ -283,4 +422,5 @@ All existing JavaScript handlers in `app.js` must remain wired up. The HTML rest
 | `AI-VC.html` | Main hi-fi prototype — open in browser to see the full design |
 | `ai-vc-panels.jsx` | Header, Sessions drawer, Thinking panel, Settings modal components |
 | `ai-vc-workspaces.jsx` | Chat workspace and Code workspace components |
+| `ai-vc-image-workspace.jsx` | Image workspace component (library, generation bar, edit modal) |
 | `AI-VC Wireframes v2.html` | Earlier wireframe exploration for layout context |

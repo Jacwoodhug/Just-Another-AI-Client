@@ -197,6 +197,7 @@
   border: 1px solid var(--stroke);
   overflow: hidden;
   background: rgba(22, 17, 11, 0.9);
+  flex-shrink: 0;
 }
 
 .code-log-block-header {
@@ -354,6 +355,18 @@
   text-decoration: line-through;
   text-decoration-color: rgba(240, 138, 108, 0.4);
 }
+/* Intra-line pairs: suppress full-line strikethrough; only deleted words get it */
+.code-diff-line.del.intra { text-decoration: none; }
+.diff-word-del {
+  background: rgba(240, 138, 108, 0.28);
+  border-radius: 2px;
+  text-decoration: line-through;
+  text-decoration-color: rgba(240, 138, 108, 0.7);
+}
+.diff-word-add {
+  background: rgba(74, 160, 140, 0.28);
+  border-radius: 2px;
+}
 .code-diff-line.ctx { color: rgba(246, 239, 230, 0.45); }
 
 /* ── Console block ───────────────────────────────────────────────────────── */
@@ -426,6 +439,7 @@
 
 /* ── Code composer ───────────────────────────────────────────────────────── */
 .code-composer {
+  position: relative;
   flex-shrink: 0;
   padding: 10px 14px 12px;
   border-top: 1px solid var(--stroke);
@@ -467,7 +481,105 @@
 .code-composer-mic {
   height: 38px;
   width: 38px;
+  position: relative;
 }
+
+/* Hold-to-talk recording state */
+.code-composer-input.recording {
+  border-color: rgba(212, 87, 42, 0.5);
+}
+
+.code-mic-blink-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--accent);
+  animation: codeMicBlink 0.7s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes codeMicBlink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.2; }
+}
+
+/* ── Custom file tree checkbox ───────────────────────────────────────────── */
+.code-tree-checkbox {
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--stroke);
+  border-radius: 3px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  transition: all 0.1s;
+  margin-right: 4px;
+}
+
+.code-tree-checkbox.checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.code-tree-checkbox-check {
+  color: #fff;
+  font-size: 9px;
+  line-height: 1;
+}
+
+/* ── Bulk bar ────────────────────────────────────────────────────────────── */
+.code-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--stroke);
+  background: rgba(14, 10, 7, 0.97);
+  flex-shrink: 0;
+}
+
+.code-bulk-bar-info {
+  font-family: var(--font);
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+}
+
+.code-bulk-bar-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.code-approve-btn {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(74, 160, 140, 0.4);
+  background: rgba(74, 160, 140, 0.1);
+  color: #7ecfc0;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.code-approve-btn:hover { background: rgba(74, 160, 140, 0.2); }
+
+.code-deny-btn {
+  font-family: var(--font);
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(212, 87, 42, 0.4);
+  background: rgba(212, 87, 42, 0.1);
+  color: var(--accent);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.code-deny-btn:hover { background: rgba(212, 87, 42, 0.2); }
 
 /* ── Code context menu ───────────────────────────────────────────────────── */
 .code-ctx-menu {

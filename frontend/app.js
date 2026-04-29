@@ -90,6 +90,10 @@ const sessionScrim = document.getElementById("sessionScrim");
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
+// Set to true by React (main.jsx) once the ChatWorkspace is mounted.
+// When true, DOM chat-log mutations are bypassed in favour of custom events.
+window.__chatReactActive = false;
+
 let recognition = null;
 let isListening = false;
 let isSessionPanelOpen = false;
@@ -115,6 +119,7 @@ function setProcessing(active) {
     sendBtn.textContent = "Send";
     sendBtn.classList.remove("cancel");
   }
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { isProcessing: active } }));
 }
 
 function cancelActiveRequest() {
@@ -231,6 +236,7 @@ function newSession() {
   editingSessionId = null;
   editingSessionDraft = "";
   chatLog.innerHTML = "";
+  if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:clear', {}));
   updateThinkingPanel([]);
   clearThinkingMessages();
   setThinkingContext("");
@@ -293,6 +299,7 @@ function setTtsEnabled(enabled) {
   if (!enabled) {
     stopTtsPlayback();
   }
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { ttsOn: enabled } }));
 }
 
 function normalizeProvider(value) {
@@ -503,6 +510,7 @@ function switchSession(id) {
   pendingTranscript = "";
   interimText.textContent = "...";
   chatLog.innerHTML = "";
+  if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:clear', {}));
   updateThinkingPanel([]);
   clearThinkingMessages();
   setThinkingContext("");
@@ -813,6 +821,7 @@ function saveChatMessage(role, text, imageDataUrl, personalityName) {
 function loadChatHistory() {
   const key = getChatHistoryKey(sessionId);
   if (!key) {
+    if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:reload', {}));
     return;
   }
   let history = [];
@@ -822,6 +831,11 @@ function loadChatHistory() {
     history = [];
   }
   if (!Array.isArray(history) || history.length === 0) {
+    if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:reload', {}));
+    return;
+  }
+  if (window.__chatReactActive) {
+    window.dispatchEvent(new CustomEvent('chat:reload', {}));
     return;
   }
   chatLog.innerHTML = "";
@@ -859,6 +873,7 @@ function setIdleCaptureEnabled(enabled) {
     idleCaptureToggle.setAttribute("aria-pressed", String(enabled));
   }
   localStorage.setItem("idleCaptureEnabled", String(enabled));
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { idleOn: enabled } }));
 }
 
 async function startScreenCapture() {
@@ -899,6 +914,7 @@ async function startScreenCapture() {
     screenCaptureBtn.textContent = "Disable screen";
     screenCaptureBtn.classList.add("active");
   }
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { screenOn: true } }));
 }
 
 function stopScreenCapture() {
@@ -912,6 +928,7 @@ function stopScreenCapture() {
     screenCaptureBtn.textContent = "Enable screen";
     screenCaptureBtn.classList.remove("active");
   }
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { screenOn: false } }));
 }
 
 function captureScreenBase64() {
@@ -1342,6 +1359,7 @@ function clearImage() {
   }
   const area = document.getElementById("imagePreviewArea");
   if (area) area.style.display = "none";
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { attachedImage: null } }));
 }
 
 function attachImageFile(file) {
@@ -1361,6 +1379,7 @@ function attachImageFile(file) {
     if (imageClearBtn) {
       imageClearBtn.disabled = false;
     }
+    window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { attachedImage: { dataUrl: result, name: file.name } } }));
   };
   reader.readAsDataURL(file);
 }
@@ -1412,6 +1431,17 @@ function createChatItem(role, text, variant, imageDataUrl, personalityName) {
 
   chatLog.appendChild(item);
   chatLog.scrollTop = chatLog.scrollHeight;
+
+  // Dispatch event for React ChatWorkspace
+  const _chatMsgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  item._chatId = _chatMsgId;
+  const _isStreamPlaceholder = role === 'assistant' && !text && !variant && !imageDataUrl;
+  if (_isStreamPlaceholder) {
+    window.dispatchEvent(new CustomEvent('chat:streamStart', { detail: { id: _chatMsgId, personalityName } }));
+  } else {
+    window.dispatchEvent(new CustomEvent('chat:add', { detail: { id: _chatMsgId, role, text, variant, imageDataUrl, personalityName } }));
+  }
+
   return { item, body };
 }
 
@@ -1458,14 +1488,20 @@ function hideTypingIndicator() {
   if (_typingIndicatorItem && _typingIndicatorItem.parentNode) {
     _typingIndicatorItem.parentNode.removeChild(_typingIndicatorItem);
   }
+  if (_typingIndicatorItem?._chatId) {
+    window.dispatchEvent(new CustomEvent('chat:remove', { detail: { id: _typingIndicatorItem._chatId } }));
+  }
   _typingIndicatorItem = null;
 }
 
 function addGeneratingStatus(text) {
   if (_generatingStatusItem && _generatingStatusItem.parentNode) {
     _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
-    _generatingStatusItem = null;
   }
+  if (_generatingStatusItem?._chatId) {
+    window.dispatchEvent(new CustomEvent('chat:remove', { detail: { id: _generatingStatusItem._chatId } }));
+  }
+  _generatingStatusItem = null;
   const { item, body } = createChatItem("assistant", "", "status generating");
   const spinner = document.createElement("span");
   spinner.className = "gen-spinner";
@@ -1474,6 +1510,7 @@ function addGeneratingStatus(text) {
   label.textContent = text;
   body.appendChild(label);
   _generatingStatusItem = item;
+  window.dispatchEvent(new CustomEvent('chat:statusUpdate', { detail: { id: item._chatId, text } }));
   return item;
 }
 
@@ -1535,7 +1572,10 @@ function addToImageGroup(url) {
   if (_generatingStatusItem) {
     const label = _generatingStatusItem.querySelector("span:not(.gen-spinner)");
     if (label && (_imageGenTotal === 0 || count >= _imageGenTotal)) {
-      label.textContent = "Composing replyâ€¦";
+      label.textContent = "Composing reply\u2026";
+      if (_generatingStatusItem?._chatId) {
+        window.dispatchEvent(new CustomEvent('chat:statusUpdate', { detail: { id: _generatingStatusItem._chatId, text: "Composing reply\u2026" } }));
+      }
     }
   }
 
@@ -1544,6 +1584,7 @@ function addToImageGroup(url) {
   // Persist URL path (not base64) to avoid localStorage quota issues
   if (!_currentImageGroupSaveId) _currentImageGroupSaveId = `img-${Date.now()}`;
   saveOrUpdateImageGroup(_currentImageGroupSaveId, url);
+  window.dispatchEvent(new CustomEvent('chat:imageGroupAdd', { detail: { groupId: _currentImageGroupSaveId, url } }));
 }
 
 function buildUtterance(text) {
@@ -2032,6 +2073,7 @@ async function sendText(text, options = {}) {
           }
           const spokenDisplay = spokenText.trimEnd();
           assistantItem.body.textContent = spokenDisplay;
+          window.dispatchEvent(new CustomEvent('chat:token', { detail: { id: assistantItem.item._chatId, text: spokenDisplay } }));
           if (spokenDisplay.startsWith(lastSpokenSanitized)) {
             const newChunk = spokenDisplay.slice(lastSpokenSanitized.length);
             if (newChunk) {
@@ -2063,8 +2105,14 @@ async function sendText(text, options = {}) {
           if (_generatingStatusItem && _generatingStatusItem.parentNode) {
             _generatingStatusItem.parentNode.removeChild(_generatingStatusItem);
           }
+          if (_generatingStatusItem?._chatId) {
+            window.dispatchEvent(new CustomEvent('chat:remove', { detail: { id: _generatingStatusItem._chatId } }));
+          }
           _generatingStatusItem = null;
           hideTypingIndicator();
+          if (assistantItem?.item._chatId) {
+            window.dispatchEvent(new CustomEvent('chat:streamEnd', { detail: { id: assistantItem.item._chatId } }));
+          }
           const toolCalls = Array.isArray(message.tool_calls_made)
             ? message.tool_calls_made
             : [];
@@ -2376,6 +2424,7 @@ if (thinkingLoopToggle) {
     thinkingLoopToggle.setAttribute("aria-pressed", String(thinkingLoopEnabled));
     thinkingLoopToggle.textContent = `Thinking loop: ${thinkingLoopEnabled ? "on" : "off"}`;
     localStorage.setItem("thinkingLoopEnabled", String(thinkingLoopEnabled));
+    window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { loopOn: thinkingLoopEnabled } }));
   });
 }
 
@@ -2403,6 +2452,7 @@ startBtn.addEventListener("click", () => {
       startBtn.setAttribute("aria-pressed", "false");
     }
   }
+  window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { isListening } }));
 });
 
 stopBtn.addEventListener("click", () => {
@@ -2523,7 +2573,7 @@ function updateKokoroUI() {
   } else if (kokoroServiceBusy) {
     kokoroStatusDot.classList.add("stopped");
     hdrKokoroDot?.classList.add("stopped");
-    kokoroStatusText.textContent = kokoroServiceRunning ? "Stoppingâ€¦" : "Startingâ€¦";
+    kokoroStatusText.textContent = kokoroServiceRunning ? "Stopping…" : "Starting…";
     kokoroToggleBtn.textContent = kokoroServiceRunning ? "Stop Service" : "Launch";
     kokoroToggleBtn.disabled = true;
   } else if (kokoroServiceRunning) {
@@ -2614,7 +2664,7 @@ function updateComfyUIUI() {
   } else if (comfyuiServiceBusy) {
     comfyuiStatusDot.classList.add("stopped");
     hdrComfyuiDot?.classList.add("stopped");
-    comfyuiStatusText.textContent = comfyuiServiceRunning ? "Stoppingâ€¦" : "Startingâ€¦";
+    comfyuiStatusText.textContent = comfyuiServiceRunning ? "Stopping…" : "Starting…";
     comfyuiToggleBtn.textContent = comfyuiServiceRunning ? "Stop Service" : "Launch";
     comfyuiToggleBtn.disabled = true;
   } else if (comfyuiServiceRunning) {
@@ -3828,6 +3878,84 @@ updateVramIndicator();
 setInterval(updateVramIndicator, 5000);
 
 // ---------------------------------------------------------------------------
+// chatBridge – exposed to React ChatWorkspace via window.chatBridge
+// ---------------------------------------------------------------------------
+window.chatBridge = {
+  getSlashCommands() {
+    return SLASH_COMMANDS.map(c => ({ name: c.name, desc: c.desc, requiresInput: !!c.requiresInput }));
+  },
+  tryExecuteSlashCommand(text) {
+    return tryDispatchSlashCommand(text);
+  },
+  getState() {
+    return {
+      isListening,
+      screenOn: Boolean(screenStream),
+      idleOn: idleCaptureEnabled,
+      loopOn: thinkingLoopEnabled,
+      ttsOn: ttsEnabled,
+      isProcessing: Boolean(activeAbortController),
+      attachedImage: attachedImage
+        ? { dataUrl: attachedImage.dataUrl, name: attachedImage.name }
+        : null,
+    };
+  },
+  getHistory() {
+    const key = getChatHistoryKey(sessionId);
+    if (!key) return [];
+    try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch { return []; }
+  },
+  sendText(text, opts) {
+    // Intercept slash commands when no special options are present
+    if (!opts && tryDispatchSlashCommand(text)) return;
+    return sendText(text, opts);
+  },
+  toggleMic() {
+    if (!recognition) return;
+    if (isListening) {
+      isListening = false;
+      recognition.stop();
+      startBtn?.classList.remove('active');
+      startBtn?.setAttribute('aria-pressed', 'false');
+    } else {
+      isListening = true;
+      startBtn?.classList.add('active');
+      startBtn?.setAttribute('aria-pressed', 'true');
+      markSpeechActivity();
+      try { recognition.start(); } catch(_) { isListening = false; }
+    }
+    window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { isListening } }));
+  },
+  toggleScreen() { if (screenStream) stopScreenCapture(); else startScreenCapture(); },
+  toggleIdle()   { setIdleCaptureEnabled(!idleCaptureEnabled); },
+  toggleLoop() {
+    thinkingLoopEnabled = !thinkingLoopEnabled;
+    if (thinkingLoopToggle) {
+      thinkingLoopToggle.classList.toggle('off', !thinkingLoopEnabled);
+      thinkingLoopToggle.classList.toggle('active', thinkingLoopEnabled);
+      thinkingLoopToggle.setAttribute('aria-pressed', String(thinkingLoopEnabled));
+      thinkingLoopToggle.textContent = `Thinking loop: ${thinkingLoopEnabled ? 'on' : 'off'}`;
+    }
+    localStorage.setItem('thinkingLoopEnabled', String(thinkingLoopEnabled));
+    window.dispatchEvent(new CustomEvent('chat:stateUpdate', { detail: { loopOn: thinkingLoopEnabled } }));
+  },
+  toggleTts()     { setTtsEnabled(!ttsEnabled); },
+  newChat()       { newSession(); },
+  openAttach()    { if (imageInput) imageInput.click(); },
+  clearAttach()   { clearImage(); },
+  cancelRequest() { cancelActiveRequest(); },
+};
+
+// Called by the Code workspace React hook after each API response
+window.updateCodeThinking = function(data) {
+  const toolCallsMade = Array.isArray(data.tool_calls_made) ? data.tool_calls_made : [];
+  updateThinkingPanel(toolCallsMade);
+  setRawOutput(data.raw_output || '');
+  setThinkingContext(data.context_debug || '');
+  updateThinkingTokenEstimate(data.context_debug || '');
+};
+
+// ---------------------------------------------------------------------------
 // Image lightbox
 // ---------------------------------------------------------------------------
 (function () {
@@ -4169,14 +4297,17 @@ setInterval(updateVramIndicator, 5000);
       );
     } catch (_) {}
 
-    // 2. Remove last assistant DOM item
+    // 2. Notify React to remove last AI message from state
+    window.dispatchEvent(new CustomEvent('chat:removeLastRole', { detail: { role: 'ai' } }));
+
+    // 3. Legacy DOM removal (no-op after React migration)
     const lastA = getLastRealItem('assistant');
     if (lastA) lastA.remove();
 
-    // 3. Remove last assistant entry from localStorage
+    // 4. Remove last assistant entry from localStorage
     removeLastFromHistory('assistant');
 
-    // 4. Re-send the same prompt without re-adding user to DB
+    // 5. Re-send the same prompt without re-adding user to DB
     await sendText(prompt, { regenerate: true });
   }
 
@@ -4191,11 +4322,14 @@ setInterval(updateVramIndicator, 5000);
       );
     } catch (_) {}
 
-    // 2. Remove last assistant DOM item
+    // 2. Notify React to remove last AI message from state
+    window.dispatchEvent(new CustomEvent('chat:removeLastRole', { detail: { role: 'ai' } }));
+
+    // 3. Legacy DOM removal (no-op after React migration)
     const lastA = getLastRealItem('assistant');
     if (lastA) lastA.remove();
 
-    // 3. Remove from localStorage
+    // 4. Remove from localStorage
     removeLastFromHistory('assistant');
   }
 
@@ -4210,11 +4344,13 @@ setInterval(updateVramIndicator, 5000);
       );
     } catch (_) {}
 
-    // 2. Remove last assistant DOM item (may not exist if user hasn't responded)
+    // 2. Notify React to remove last AI and user messages from state
+    window.dispatchEvent(new CustomEvent('chat:removeLastRole', { detail: { role: 'ai' } }));
+    window.dispatchEvent(new CustomEvent('chat:removeLastRole', { detail: { role: 'user' } }));
+
+    // 3. Legacy DOM removal (no-op after React migration)
     const lastA = getLastRealItem('assistant');
     if (lastA) lastA.remove();
-
-    // 3. Remove last user DOM item
     const lastU = getLastRealItem('user');
     if (lastU) lastU.remove();
 
@@ -4336,5 +4472,16 @@ setInterval(updateVramIndicator, 5000);
   });
 
   document.addEventListener('scroll', () => { if (!ctxMenu.hidden) hideMenu(); }, true);
+
+  // Expose actions to the React workspace via chatBridge
+  window.chatBridge.regenerateAssistant = actionRegenerateAssistant;
+  window.chatBridge.deleteLastAssistant  = actionDeleteAssistant;
+  window.chatBridge.deleteLastExchange   = actionDeleteExchange;
+  window.chatBridge.resendText = async (text) => {
+    await actionDeleteExchange();
+    await sendText(text);
+    resetThinkingTimer();
+    resetIdleCaptureTimer();
+  };
 }());
 

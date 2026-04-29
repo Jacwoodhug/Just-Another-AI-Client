@@ -795,6 +795,10 @@ select:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-direction: column;
   gap: 3px;
 }
+#thinkingToolCalls li {
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
 
 .thinking-screenshot {
   border-radius: 10px;

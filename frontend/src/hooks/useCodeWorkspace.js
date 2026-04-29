@@ -36,7 +36,15 @@ export function useCodeWorkspace() {
   const [runOutCap,  setRunOutCap]    = useState(() => saved?.cap ?? 50);
 
   const [treeData, setTreeData]             = useState([]);
-  const [log, setLog]                       = useState([]); // array of {type, ...props}
+  const [log, setLog]                       = useState(() => {
+    if (!saved?.log) return [];
+    // Pending approvals can't be acted on after a reload — mark them expired
+    return saved.log.map(e =>
+      e.type === 'approval' && !['approved', 'denied', 'expired'].includes(e.status)
+        ? { ...e, status: 'expired' }
+        : e
+    );
+  });
   const [pendingApproval, setPendingApproval] = useState(null);
   const [running, setRunning]               = useState(false);
   const [undoSummary, setUndoSummary]       = useState(null);
@@ -56,9 +64,10 @@ export function useCodeWorkspace() {
         hid:  [...hidden],
         to:   runTimeout,
         cap:  runOutCap,
+        log,
       });
     }, 200);
-  }, [sessionId, dirs, selected, prevented, hidden, runTimeout, runOutCap]);
+  }, [sessionId, dirs, selected, prevented, hidden, runTimeout, runOutCap, log]);
 
   // ── Tree ────────────────────────────────────────────────────────────────
   const refreshTree = useCallback(async () => {
@@ -107,6 +116,8 @@ export function useCodeWorkspace() {
 
   // ── Response handler ─────────────────────────────────────────────────────
   function _handleResp(data, lastApprovalPath) {
+    window.updateCodeThinking?.(data);
+
     const entries = [];
 
     for (const ae of (data.auto_executed || [])) {
@@ -238,6 +249,7 @@ export function useCodeWorkspace() {
   const doClearHistory = useCallback(async (sessionOnly) => {
     try {
       await api.clearHistory(sessionOnly ? sessionId : null);
+      setLog([]);
       fetchUndoRedo();
     } catch {}
   }, [sessionId, fetchUndoRedo]);

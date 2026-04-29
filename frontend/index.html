@@ -169,15 +169,7 @@
           </div>
         </div>
 
-        <!-- Hidden elements kept for app.js compatibility -->
-        <input id="imageInput" type="file" accept="image/*" hidden />
-        <button id="stopBtn" type="button" hidden></button>
-        <div id="interimText" hidden></div>
-        <div id="screenStatus" hidden></div>
-        <div id="micStatus" hidden></div>
-        <div id="sessionStatus" hidden></div>
-        <div id="modelStatus" hidden></div>
-        <div id="providerBadge" hidden></div>
+        <!-- Hidden elements kept for app.js compatibility (moved outside chatWorkspace so React mount doesn't detach them) -->
       </div><!-- /chatWorkspace -->
 
       <!-- Code workspace -->
@@ -531,6 +523,16 @@
 
   <!-- Service toasts -->
   <div id="serviceToasts" aria-live="polite"></div>
+
+  <!-- Hidden elements required by app.js – kept outside React mount targets -->
+  <input id="imageInput" type="file" accept="image/*" hidden />
+  <button id="stopBtn" type="button" hidden></button>
+  <div id="interimText" hidden></div>
+  <div id="screenStatus" hidden></div>
+  <div id="micStatus" hidden></div>
+  <div id="sessionStatus" hidden></div>
+  <div id="modelStatus" hidden></div>
+  <div id="providerBadge" hidden></div>
 
   <script src="/static/app.js"></script>
   <script src="/static/assets/code-workspace.js"></script>
