@@ -126,10 +126,10 @@ export default function ChatComposer({
           </svg>
         </button>
 
-        <input
-          type="text"
+        <textarea
           className="chat-composer-input"
           placeholder="Type a message…"
+          rows={1}
           value={text}
           onChange={e => onTextChange(e.target.value)}
           onKeyDown={handleKeyDownWrapper}

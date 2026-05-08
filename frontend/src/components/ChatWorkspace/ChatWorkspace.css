@@ -200,7 +200,7 @@
 .chat-composer-row {
   display: flex;
   gap: 8px;
-  align-items: center;
+  align-items: flex-end;
 }
 
 .chat-composer-input {
@@ -213,6 +213,10 @@
   font-size: 14px;
   padding: 9px 14px;
   outline: none;
+  resize: none;
+  overflow-y: auto;
+  max-height: 120px;
+  line-height: 1.45;
   transition: border-color 0.15s;
 }
 .chat-composer-input:focus { border-color: rgba(212, 87, 42, 0.5); }

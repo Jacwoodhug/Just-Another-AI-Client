@@ -23,10 +23,16 @@ def generate(
     base_url: str,
     workflow_json: Optional[str] = None,
     session_id: str = "",
-) -> str:
-    """Build a workflow, submit it to ComfyUI, and return the saved image path."""
+    seed: Optional[int] = None,
+) -> tuple:
+    """Build a workflow, submit it to ComfyUI.
 
-    seed = int(uuid.uuid4().int % (2**32))
+    Returns ``(image_path: str, seed: int)``.
+    If *seed* is ``None`` a random seed is generated.
+    """
+
+    if seed is None:
+        seed = int(uuid.uuid4().int % (2**32))
 
     if workflow_json:
         # Use the custom workflow with placeholder substitution
@@ -143,4 +149,4 @@ def generate(
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / new_filename
     dest.write_bytes(view_resp.content)
-    return str(dest.resolve())
+    return str(dest.resolve()), seed

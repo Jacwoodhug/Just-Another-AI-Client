@@ -65,6 +65,8 @@ else:
 COMFYUI_MODELS_PATH = os.getenv("COMFYUI_MODELS_PATH", "").strip()
 COMFYUI_VRAM_THRESHOLD_GB = float(os.getenv("COMFYUI_VRAM_THRESHOLD_GB", "10"))
 COMFYUI_OUTPUT_DIR = BASE_DIR / "generated_images"
+IMAGE_LIBRARY_FILE = COMFYUI_OUTPUT_DIR / "library.json"
+IMAGE_FOLDERS_FILE = COMFYUI_OUTPUT_DIR / "folders.json"
 
 CHAT_MAX_HISTORY = int(os.getenv("CHAT_MAX_HISTORY", "20"))
 CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "4096"))
@@ -593,6 +595,9 @@ class GenerateImageRequest(BaseModel):
     raw: Optional[bool] = False
     model: Optional[str] = None
     provider: Optional[str] = None
+    seed: Optional[int] = None               # None = random
+    workspace: Optional[str] = None          # "chat" | "image"
+    personality_id: Optional[str] = None     # personality that triggered generation
 
 
 class ModelListResponse(BaseModel):
@@ -660,6 +665,211 @@ logging.getLogger("uvicorn.access").addFilter(_NoVramFilter())
 # Serve generated images statically
 COMFYUI_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/generated_images", StaticFiles(directory=str(COMFYUI_OUTPUT_DIR)), name="generated_images")
+
+
+# ---------------------------------------------------------------------------
+# Image library helpers
+# ---------------------------------------------------------------------------
+_library_lock = __import__("threading").Lock()
+
+
+def _load_library() -> Dict[str, Any]:
+    """Load library.json; returns empty dict if missing or corrupt."""
+    try:
+        if IMAGE_LIBRARY_FILE.exists():
+            return json.loads(IMAGE_LIBRARY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_library(data: Dict[str, Any]) -> None:
+    IMAGE_LIBRARY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    IMAGE_LIBRARY_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _library_upsert(filename: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Thread-safe update of a single entry; returns updated entry."""
+    with _library_lock:
+        lib = _load_library()
+        entry = lib.get(filename, {})
+        entry.update(updates)
+        lib[filename] = entry
+        _save_library(lib)
+        return entry
+
+
+def _load_folders() -> List[str]:
+    """Load explicitly-created folders from folders.json."""
+    try:
+        if IMAGE_FOLDERS_FILE.exists():
+            data = json.loads(IMAGE_FOLDERS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+
+def _save_folders(folders: List[str]) -> None:
+    IMAGE_FOLDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    IMAGE_FOLDERS_FILE.write_text(json.dumps(sorted(folders), indent=2), encoding="utf-8")
+
+
+def _image_url_for(filename: str) -> str:
+    """Convert a filename to its URL path."""
+    # Check direct/ subfolder first
+    direct = COMFYUI_OUTPUT_DIR / "direct" / filename
+    if direct.exists():
+        return f"/generated_images/direct/{filename}"
+    # Check session-based subfolders (e.g. b196b431/b196b431_66dc.png)
+    root_file = COMFYUI_OUTPUT_DIR / filename
+    if root_file.exists():
+        return f"/generated_images/{filename}"
+    # Scan one level of subdirectories
+    for subdir in COMFYUI_OUTPUT_DIR.iterdir():
+        if subdir.is_dir() and (subdir / filename).exists():
+            return f"/generated_images/{subdir.name}/{filename}"
+    return f"/generated_images/{filename}"
+
+
+# ---------------------------------------------------------------------------
+# Image library Pydantic models
+# ---------------------------------------------------------------------------
+
+class FolderCreateRequest(BaseModel):
+    name: str
+
+class ImageFolderRequest(BaseModel):
+    folder: Optional[str] = None
+
+class BulkDeleteRequest(BaseModel):
+    filenames: List[str]
+
+class BulkFolderRequest(BaseModel):
+    filenames: List[str]
+    folder: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Image library routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/images")
+def list_images():
+    """Return all images with metadata."""
+    with _library_lock:
+        lib = _load_library()
+    results = []
+    for filename, meta in lib.items():
+        results.append({"filename": filename, "url": _image_url_for(filename), **meta})
+    # Sort newest first
+    results.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    return results
+
+
+@app.get("/api/images/folders")
+def list_folders():
+    """Return list of unique folder names (explicit + inferred from images)."""
+    with _library_lock:
+        lib = _load_library()
+    from_images = {m.get("folder") for m in lib.values() if m.get("folder")}
+    explicit = set(_load_folders())
+    return sorted(from_images | explicit)
+
+
+@app.post("/api/images/folders")
+def create_folder(req: FolderCreateRequest):
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    folders = _load_folders()
+    if name not in folders:
+        folders.append(name)
+        _save_folders(folders)
+    return {"name": name}
+
+
+@app.delete("/api/images/folders/{name}")
+def delete_folder(name: str):
+    """Remove folder assignment from all images and delete the folder record."""
+    with _library_lock:
+        lib = _load_library()
+        for entry in lib.values():
+            if entry.get("folder") == name:
+                entry["folder"] = None
+        _save_library(lib)
+    folders = _load_folders()
+    if name in folders:
+        folders.remove(name)
+        _save_folders(folders)
+    return {"status": "ok"}
+
+
+@app.patch("/api/images/{filename}/star")
+def toggle_star(filename: str):
+    with _library_lock:
+        lib = _load_library()
+        entry = lib.get(filename, {})
+        entry["starred"] = not entry.get("starred", False)
+        lib[filename] = entry
+        _save_library(lib)
+        return {"filename": filename, "starred": entry["starred"]}
+
+
+@app.patch("/api/images/{filename}/folder")
+def set_image_folder(filename: str, req: ImageFolderRequest):
+    entry = _library_upsert(filename, {"folder": req.folder})
+    return {"filename": filename, "folder": entry.get("folder")}
+
+
+@app.delete("/api/images/{filename}")
+def delete_image(filename: str):
+    """Delete image file + metadata entry."""
+    with _library_lock:
+        lib = _load_library()
+        lib.pop(filename, None)
+        _save_library(lib)
+    # Try to delete the actual file
+    for subdir in [COMFYUI_OUTPUT_DIR / "direct", COMFYUI_OUTPUT_DIR]:
+        candidate = subdir / filename
+        if candidate.exists():
+            try:
+                candidate.unlink()
+            except Exception:
+                pass
+            break
+    return {"status": "ok"}
+
+
+@app.post("/api/images/bulk-delete")
+def bulk_delete_images(req: BulkDeleteRequest):
+    with _library_lock:
+        lib = _load_library()
+        for filename in req.filenames:
+            lib.pop(filename, None)
+            for subdir in [COMFYUI_OUTPUT_DIR / "direct", COMFYUI_OUTPUT_DIR]:
+                candidate = subdir / filename
+                if candidate.exists():
+                    try:
+                        candidate.unlink()
+                    except Exception:
+                        pass
+                    break
+        _save_library(lib)
+    return {"status": "ok", "deleted": req.filenames}
+
+
+@app.post("/api/images/bulk-folder")
+def bulk_set_folder(req: BulkFolderRequest):
+    with _library_lock:
+        lib = _load_library()
+        for filename in req.filenames:
+            entry = lib.get(filename, {})
+            entry["folder"] = req.folder
+            lib[filename] = entry
+        _save_library(lib)
+    return {"status": "ok"}
 
 
 @app.get("/")
@@ -1173,7 +1383,7 @@ def _execute_tool(
         COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
         try:
             from comfyui_service import generate as _comfyui_generate
-            file_path = _comfyui_generate(
+            file_path, _ = _comfyui_generate(
                 prompt=prompt, negative_prompt=negative_prompt,
                 checkpoint=COMFYUI_CHECKPOINT, width=w, height=h,
                 steps=settings["steps"], cfg=settings["cfg"],
@@ -1193,6 +1403,71 @@ def _extract_tool_calls_ollama(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract tool calls from an Ollama chat response."""
     message = data.get("message", {})
     return message.get("tool_calls") or []
+
+
+def _parse_kv_args(args_str: str) -> Dict[str, Any]:
+    """Parse key:value pairs from informal tool-call arg strings.
+
+    Handles Mistral-style <|"|> quote delimiters as well as plain JSON.
+    """
+    clean = args_str.replace('<|"|>', '"')
+    try:
+        return json.loads("{" + clean + "}")
+    except json.JSONDecodeError:
+        pass
+    result: Dict[str, Any] = {}
+    for m in re.finditer(r'(\w+)\s*:\s*(?:"([^"]*?)"|([^,}\s]+))', clean):
+        key = m.group(1)
+        result[key] = m.group(2) if m.group(2) is not None else m.group(3)
+    return result
+
+
+def _parse_text_tool_calls(text: str, tool_names: set) -> List[Dict[str, Any]]:
+    """Extract tool calls embedded in plain text for models that emit them inline.
+
+    Tries several common patterns in order of specificity and returns the first
+    non-empty match set so we don't double-execute.
+    """
+    extracted: List[Dict[str, Any]] = []
+
+    # Pattern 1: [TOOL_CALL] toolName{key:<|"|>value<|"|>, ...}  (Mistral-small style)
+    for m in re.finditer(r"\[TOOL_CALL\]\s*(\w+)\s*\{([^}]*)\}", text, re.IGNORECASE):
+        name = m.group(1)
+        if name not in tool_names:
+            continue
+        extracted.append({"function": {"name": name, "arguments": _parse_kv_args(m.group(2))}})
+    if extracted:
+        return extracted
+
+    # Pattern 2: <tool_call>{"name":"...", "arguments":{...}}</tool_call>
+    for m in re.finditer(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", text, re.DOTALL | re.IGNORECASE):
+        try:
+            obj = json.loads(m.group(1))
+            name = obj.get("name", "")
+            if name not in tool_names:
+                continue
+            args = obj.get("arguments", obj.get("parameters", {}))
+            extracted.append({"function": {"name": name, "arguments": args}})
+        except json.JSONDecodeError:
+            pass
+    if extracted:
+        return extracted
+
+    # Pattern 3: bare JSON {"name": "toolName", "arguments": {...}}
+    for m in re.finditer(
+        r'\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[^{}]*\})\s*\}',
+        text,
+        re.DOTALL,
+    ):
+        name = m.group(1)
+        if name not in tool_names:
+            continue
+        try:
+            extracted.append({"function": {"name": name, "arguments": json.loads(m.group(2))}})
+        except json.JSONDecodeError:
+            pass
+
+    return extracted
 
 
 def _extract_tool_calls_openrouter(data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2267,6 +2542,18 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             data = first_data
             raw_tool_calls = _get_tool_calls_from_response(data, provider)
 
+            # Fallback: small models sometimes emit tool calls as inline text instead of
+            # structured tool_calls. Detect common patterns and retract the bad text.
+            if not raw_tool_calls and raw_content_accumulated.strip():
+                _tool_names = {t["function"]["name"] for t in tools}
+                _text_calls = _parse_text_tool_calls(raw_content_accumulated, _tool_names)
+                if _text_calls:
+                    yield json.dumps({"type": "retract"}) + "\n"
+                    raw_tool_calls = _text_calls
+                    spoken_text = ""
+                    silent_text = ""
+                    data = {"message": {"content": "", "tool_calls": _text_calls}}
+
             # Fallback: if streaming produced no text and no tool calls, the LLM likely
             # intended a tool call but the streaming done message didn't include tool_calls
             # (a known limitation of some Ollama/OpenRouter streaming responses).
@@ -2353,7 +2640,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                                     COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
                                     try:
                                         from comfyui_service import generate as _comfyui_generate
-                                        file_path = _comfyui_generate(
+                                        file_path, _ = _comfyui_generate(
                                             prompt=prompt_arg, negative_prompt=negative_prompt_arg,
                                             checkpoint=COMFYUI_CHECKPOINT, width=w, height=h,
                                             steps=settings["steps"], cfg=settings["cfg"],
@@ -2378,6 +2665,22 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                             filename = Path(image_path_for_injection).name
                             short_id = session_id.split("-")[0] if session_id else ""
                             image_url = f"/generated_images/{short_id}/{filename}" if short_id else f"/generated_images/{filename}"
+                            # Add to library so it appears in the Image workspace
+                            _library_upsert(filename, {
+                                "prompt": locals().get("prompt_arg", str(args.get("prompt", ""))),
+                                "negPrompt": locals().get("negative_prompt_arg", str(args.get("negative_prompt", ""))),
+                                "enhancedPrompt": "",
+                                "enhanced": False,
+                                "seed": None,
+                                "resolution": locals().get("resolution_arg", str(args.get("resolution", "1024x1024"))),
+                                "model": COMFYUI_CHECKPOINT,
+                                "timestamp": datetime.utcnow().isoformat() + "Z",
+                                "starred": False,
+                                "folder": None,
+                                "source": "chat",
+                                "workspace": "chat",
+                                "personality": personality_id if personality_id != "default" else None,
+                            })
                             result_text = (
                                 "Image successfully generated and is now displayed to the user in the chat. "
                                 "Respond with a [SPOKEN] message confirming the image is ready and briefly "
@@ -2878,7 +3181,7 @@ def api_generate_image(req: GenerateImageRequest) -> StreamingResponse:
         if not req.raw:
             yield json.dumps({"type": "status", "text": "Enhancing prompt\u2026"}) + "\n"
             try:
-                enhance_model = req.model or _active_model(provider)
+                enhance_model = req.model or _default_model(provider)
                 enhance_messages: List[Dict[str, Any]] = [
                     {
                         "role": "system",
@@ -2895,8 +3198,9 @@ def api_generate_image(req: GenerateImageRequest) -> StreamingResponse:
                 if enhanced_prompt:
                     final_prompt = enhanced_prompt
                     yield json.dumps({"type": "enhanced_prompt", "prompt": enhanced_prompt}) + "\n"
-            except Exception:
-                enhanced_prompt = None  # fall back to original prompt silently
+            except Exception as enhance_exc:
+                yield json.dumps({"type": "status", "text": f"Enhance failed ({enhance_exc}), using original prompt."}) + "\n"
+                enhanced_prompt = None
 
         # Unload LLM if ComfyUI isn't loaded yet and VRAM is low.
         if not _comfyui_model_loaded() and _normalize_provider(provider) != "openrouter":
@@ -2919,7 +3223,7 @@ def api_generate_image(req: GenerateImageRequest) -> StreamingResponse:
         COMFYUI_OUTPUT_DIR.mkdir(exist_ok=True)
         try:
             from comfyui_service import generate as _comfyui_generate
-            file_path = _comfyui_generate(
+            file_path, used_seed = _comfyui_generate(
                 prompt=final_prompt,
                 negative_prompt=req.negative_prompt or "",
                 checkpoint=COMFYUI_CHECKPOINT,
@@ -2933,12 +3237,29 @@ def api_generate_image(req: GenerateImageRequest) -> StreamingResponse:
                 base_url=COMFYUI_BASE_URL,
                 workflow_json=settings.get("workflow_json"),
                 session_id="direct",
+                seed=req.seed,
             )
             global _comfyui_model_in_vram
             _comfyui_model_in_vram = True
             filename = Path(file_path).name
             image_url = f"/generated_images/direct/{filename}"
-            yield json.dumps({"type": "image_ready", "url": image_url, "enhanced_prompt": enhanced_prompt}) + "\n"
+            # Persist metadata to library.json
+            _library_upsert(filename, {
+                "prompt": prompt,
+                "negPrompt": req.negative_prompt or "",
+                "enhancedPrompt": enhanced_prompt or "",
+                "enhanced": bool(enhanced_prompt),
+                "seed": used_seed,
+                "resolution": req.resolution or f"{w}x{h}",
+                "model": COMFYUI_CHECKPOINT,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "starred": False,
+                "folder": None,
+                "source": "manual",
+                "workspace": req.workspace or "image",
+                "personality": req.personality_id or None,
+            })
+            yield json.dumps({"type": "image_ready", "url": image_url, "enhanced_prompt": enhanced_prompt, "seed": used_seed}) + "\n"
         except Exception as exc:
             yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
 

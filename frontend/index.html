@@ -35,11 +35,11 @@
     <!-- Service indicators -->
     <div class="hdr-svc-pill" id="hdrKokoroPill" title="AI TTS service">
       <span class="kokoro-status-dot" id="hdrKokoroDot"></span>
-      <span class="hdr-svc-label">AITTS</span>
+      <span class="hdr-svc-label">Kokoto TTS</span>
     </div>
     <div class="hdr-svc-pill" id="hdrComfyuiPill" title="Image Generation service">
       <span class="comfyui-status-dot" id="hdrComfyuiDot"></span>
-      <span class="hdr-svc-label">ImageGen</span>
+      <span class="hdr-svc-label">ComfyUI</span>
     </div>
 
     <!-- Model selector -->
@@ -177,12 +177,8 @@
         <!-- Rendered by React: frontend/src/components/CodeWorkspace -->
       </div><!-- /codeWorkspace -->
 
-      <!-- Image workspace (placeholder) -->
-      <div class="workspace" id="imageWorkspace" data-workspace="image" hidden
-        style="align-items:center;justify-content:center;gap:10px">
-        <span style="font-size:14px;color:var(--muted)">Image workspace</span>
-        <span style="font-size:12px;color:rgba(184,168,143,0.45)">ComfyUI integration coming soon</span>
-      </div>
+      <!-- Image workspace -->
+      <div class="workspace" id="imageWorkspace" data-workspace="image" hidden></div>
 
     </main><!-- /workspaceArea -->
 
@@ -339,7 +335,7 @@
           <div class="settings-section-title">Services</div>
 
           <!-- Kokoro TTS -->
-          <div class="service-card">
+          <div class="service-card" id="kokoroServiceCard">
             <div class="service-card-header">
               <div class="service-card-status">
                 <span class="kokoro-status-dot" id="kokoroStatusDot"></span>
@@ -351,7 +347,7 @@
           </div>
 
           <!-- ComfyUI -->
-          <div class="service-card">
+          <div class="service-card" id="comfyuiServiceCard">
             <div class="service-card-header">
               <div class="service-card-status">
                 <span class="comfyui-status-dot" id="comfyuiStatusDot"></span>

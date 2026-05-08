@@ -2036,6 +2036,18 @@ async function sendText(text, options = {}) {
           continue;
         }
 
+        if (message.type === "retract") {
+          // Model emitted an inline text tool call that we're about to execute properly —
+          // clear the garbled text that was already streamed to the user.
+          spokenText = "";
+          silentText = "";
+          if (assistantItem) {
+            assistantItem.body.textContent = "";
+            window.dispatchEvent(new CustomEvent('chat:token', { detail: { id: assistantItem.item._chatId, text: "" } }));
+          }
+          continue;
+        }
+
         if (message.type === "token") {
           hideTypingIndicator();
           if (!receivedMeta || !message.text) {
@@ -2545,7 +2557,7 @@ function updateServiceToasts() {
     const dot = document.createElement("span");
     dot.className = `service-toast-dot ${state}`;
     const text = document.createElement("span");
-    text.textContent = state === "started" ? `${label} started` : `${label} ${state}â€¦`;
+    text.textContent = state === "started" ? `${label} started` : `${label} ${state}\u2026`;
     pill.appendChild(dot);
     pill.appendChild(text);
     serviceToasts.appendChild(pill);
@@ -2835,7 +2847,7 @@ if (comfyuiValidateWorkflowBtn) {
       comfyuiValidateResult.style.color = "var(--muted)";
       return;
     }
-    comfyuiValidateResult.textContent = "Validatingâ€¦";
+    comfyuiValidateResult.textContent = "Validating\u2026";
     comfyuiValidateResult.style.color = "var(--muted)";
     try {
       const res = await fetch("/api/comfyui/validate-workflow", {
@@ -2907,6 +2919,29 @@ updateSearchMethodUI();
 
 if (settingsBtn) {
   settingsBtn.addEventListener("click", openSettings);
+}
+
+function openSettingsToService(scrollId) {
+  openSettings();
+  const servicesTab = document.querySelector('.settings-tab[data-settings-tab="services"]');
+  if (servicesTab) servicesTab.click();
+  if (scrollId) {
+    requestAnimationFrame(() => {
+      document.getElementById(scrollId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
+}
+
+const hdrKokoroPill = document.getElementById('hdrKokoroPill');
+if (hdrKokoroPill) {
+  hdrKokoroPill.style.cursor = 'pointer';
+  hdrKokoroPill.addEventListener('click', () => openSettingsToService('kokoroServiceCard'));
+}
+
+const hdrComfyuiPill = document.getElementById('hdrComfyuiPill');
+if (hdrComfyuiPill) {
+  hdrComfyuiPill.style.cursor = 'pointer';
+  hdrComfyuiPill.addEventListener('click', () => openSettingsToService('comfyuiServiceCard'));
 }
 
 if (settingsClose) {
@@ -3953,6 +3988,105 @@ window.updateCodeThinking = function(data) {
   setRawOutput(data.raw_output || '');
   setThinkingContext(data.context_debug || '');
   updateThinkingTokenEstimate(data.context_debug || '');
+};
+
+// ---------------------------------------------------------------------------
+// imageChatBridge – exposed to React ImageWorkspace via window.imageChatBridge
+// ---------------------------------------------------------------------------
+window.imageChatBridge = {
+  sendText(text) {
+    if (!text || !text.trim()) return;
+    const msgId = `img-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    // Show user message
+    window.dispatchEvent(new CustomEvent('image-chat:add', {
+      detail: { id: msgId + '-u', role: 'user', text },
+    }));
+    // Show typing indicator
+    const typingId = msgId + '-t';
+    window.dispatchEvent(new CustomEvent('image-chat:add', {
+      detail: { id: typingId, role: 'typing', variant: 'typing' },
+    }));
+
+    const model = modelSelect ? modelSelect.value : null;
+    const provider = currentProvider || 'ollama';
+
+    fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: sessionId,
+        text,
+        model,
+        provider,
+        workspace: 'image',
+        hidden: false,
+      }),
+    }).then(async (res) => {
+      if (!res.ok || !res.body) {
+        window.dispatchEvent(new CustomEvent('image-chat:add', {
+          detail: { id: msgId + '-e', role: 'status', text: `Error: ${res.status}` },
+        }));
+        return;
+      }
+      const streamId = msgId + '-ai';
+      window.dispatchEvent(new CustomEvent('image-chat:streamStart', {
+        detail: { id: streamId },
+      }));
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          const t = line.trim();
+          if (!t) continue;
+          try {
+            const obj = JSON.parse(t);
+            if (obj.type === 'token') {
+              const channel = obj.channel || 'spoken';
+              if (channel === 'spoken') {
+                window.dispatchEvent(new CustomEvent('image-chat:token', {
+                  detail: { id: streamId, token: obj.text || '' },
+                }));
+              } else {
+                // silent channel → thinking panel
+                addThinkingMessage(obj.text || '', true);
+              }
+            } else if (obj.type === 'status') {
+              window.dispatchEvent(new CustomEvent('image-chat:add', {
+                detail: { id: `${msgId}-s-${Date.now()}`, role: 'status', text: obj.text || '' },
+              }));
+            } else if (obj.type === 'image_ready') {
+              window.dispatchEvent(new CustomEvent('image-chat:imageReady', {
+                detail: { url: obj.url },
+              }));
+              window.dispatchEvent(new CustomEvent('image:library_updated'));
+            } else if (obj.type === 'done') {
+              updateThinkingPanel(obj.tool_calls_made || []);
+              updateThinkingTokenEstimate(obj.context_debug || '');
+              setThinkingContext(obj.context_debug || '');
+              if (typeof setRawOutput === 'function') setRawOutput(obj.raw_output || '');
+            } else if (obj.type === 'error') {
+              window.dispatchEvent(new CustomEvent('image-chat:add', {
+                detail: { id: `${msgId}-e`, role: 'status', text: `Error: ${obj.detail}` },
+              }));
+            }
+          } catch (_) {}
+        }
+      }
+      window.dispatchEvent(new CustomEvent('image-chat:streamEnd', {
+        detail: { id: streamId },
+      }));
+    }).catch(err => {
+      window.dispatchEvent(new CustomEvent('image-chat:add', {
+        detail: { id: msgId + '-e', role: 'status', text: `Error: ${err.message}` },
+      }));
+    });
+  },
 };
 
 // ---------------------------------------------------------------------------
