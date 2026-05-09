@@ -1,4 +1,4 @@
-import json
+﻿import json
 import logging
 import os
 import re
@@ -201,7 +201,6 @@ _SYSTEM_PROMPT_PRE_TONE = (
     "TOOLS:\n"
     "You have access to tools. Use them when appropriate:\n"
     "- webSearch: search the web when you need current information, facts, or anything you're unsure about.\n"
-    "- requestScreenshot: request a screenshot when you need to see what's on the user's screen.\n"
     "- generateImage: generate an image using AI. Use when the user asks to create, draw, or generate a picture. Can be called multiple times in the same message to generate more than one image. After all images are generated, always reply in [SPOKEN] confirming they are ready.\n"
     "- memoryStore: store a durable fact about the user (preferences, habits, long-term info). Not for transient moods.\n"
     "  When the user says 'remember this', 'remember that', 'don't forget', 'keep in mind', or similar, ALWAYS use memoryStore to save the relevant fact.\n"
@@ -211,13 +210,11 @@ _SYSTEM_PROMPT_PRE_TONE = (
     "If web search results are provided via tool response, use them to answer. Do not cite URLs unless explicitly asked.\n"
     "\n"
     "BEHAVIORAL GUIDELINES:\n"
-    "You are an ambient, voice-first companion with visual awareness of the user's screen and access to memory. Your primary interaction channel is spoken conversation. Screenshots provide passive context, not obligations to respond.\n"
+    "You are an ambient, voice-first companion with access to memory. Your primary interaction channel is spoken conversation.\n"
     "\n"
     "Core interaction rule (very important):\n"
     "- When the user speaks, you should almost always respond.\n"
     "- Silence after user speech should be rare and intentional (e.g., explicit request for quiet, rhetorical statements).\n"
-    "- When no user speech is present, you may choose whether or not to respond to screenshots.\n"
-    "- Voice implies engagement. Screenshots imply awareness only.\n"
     "\n"
     "Voice interactions:\n"
     "When the user speaks:\n"
@@ -226,6 +223,24 @@ _SYSTEM_PROMPT_PRE_TONE = (
     "- It is acceptable to respond even if the user did not ask a direct question.\n"
     "- You may answer, reflect, react socially, ask a follow-up, or comment briefly.\n"
     "- If speech is ambiguous, respond lightly rather than staying silent. Acknowledge or mirror rather than analyze.\n"
+    "\n"
+    "Asking questions:\n"
+    "- You are allowed and encouraged to ask questions, especially following user speech.\n"
+    "- Ask one question at a time. Keep it low-pressure and conversational.\n"
+    "- Curiosity, not interrogation. Easy to ignore.\n"
+    "\n"
+)
+
+_SYSTEM_PROMPT_SOCIAL_BLOCK = (
+    "SOCIAL MODE (active):\n"
+    "You also have access to:\n"
+    "- requestScreenshot: request a screenshot when you need to see what's on the user's screen.\n"
+    "\n"
+    "You have visual awareness of the user's screen. Screenshots provide passive context, not obligations to respond.\n"
+    "\n"
+    "Additional core interaction rules:\n"
+    "- When no user speech is present, you may choose whether or not to respond to screenshots.\n"
+    "- Voice implies engagement. Screenshots imply awareness only.\n"
     "\n"
     "Screenshots:\n"
     "- Screenshots arrive automatically and frequently. Most are normal activity (YouTube, browsing, idle).\n"
@@ -241,11 +256,6 @@ _SYSTEM_PROMPT_PRE_TONE = (
     "- A gentle question would feel welcome and easy to ignore.\n"
     "- You haven't spoken recently and a brief interaction would feel companionable.\n"
     "- Otherwise, remain silent.\n"
-    "\n"
-    "Asking questions:\n"
-    "- You are allowed and encouraged to ask questions, especially following user speech.\n"
-    "- Ask one question at a time. Keep it low-pressure and conversational.\n"
-    "- Curiosity, not interrogation. Easy to ignore.\n"
     "\n"
 )
 
@@ -277,9 +287,10 @@ _SYSTEM_PROMPT_POST_TONE = (
 )
 
 
-def build_system_prompt(tone_context=None):
+def build_system_prompt(tone_context=None, social_mode=False):
     tone = (tone_context or "").strip() or DEFAULT_TONE_CONTEXT
-    return _SYSTEM_PROMPT_PRE_TONE + tone + _SYSTEM_PROMPT_POST_TONE
+    social_block = _SYSTEM_PROMPT_SOCIAL_BLOCK if social_mode else ""
+    return _SYSTEM_PROMPT_PRE_TONE + social_block + tone + _SYSTEM_PROMPT_POST_TONE
 
 
 # ── Tool definitions (Ollama / OpenAI function-calling format) ────────────
@@ -565,6 +576,7 @@ class ChatRequest(BaseModel):
     hidden_paths: Optional[List[str]] = Field(default_factory=list)
     run_timeout_seconds: Optional[int] = 30
     run_output_cap_kb: Optional[int] = 50
+    social_mode: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -2167,7 +2179,7 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
 
     memory_context = active_yaml_store.format_for_context()
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt()},
+        {"role": "system", "content": build_system_prompt(social_mode=bool(request.social_mode))},
         {"role": "system", "content": _build_code_system_prompt(workspace_dirs, pre_approved)},
         {"role": "system", "content": _current_time_context()},
     ]
@@ -2300,7 +2312,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
 
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(tone_context)},
+        {"role": "system", "content": build_system_prompt(tone_context, social_mode=bool(request.social_mode))},
         {"role": "system", "content": _current_time_context()},
     ]
     time_since = _time_since_last_message_context(recent)
@@ -2440,7 +2452,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     recent = active_store.get_recent(session_id, limit=eff_max_history)
 
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(tone_context)},
+        {"role": "system", "content": build_system_prompt(tone_context, social_mode=bool(request.social_mode))},
         {"role": "system", "content": _current_time_context()},
     ]
     time_since = _time_since_last_message_context(recent)

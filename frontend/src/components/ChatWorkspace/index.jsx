@@ -51,6 +51,7 @@ export default function ChatWorkspace() {
         onNewChat={ws.newChat}
         isProcessing={ws.isProcessing}
         onCancel={ws.cancelRequest}
+        socialOn={ws.socialOn}
       />
     </>
   );

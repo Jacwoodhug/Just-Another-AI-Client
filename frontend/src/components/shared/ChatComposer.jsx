@@ -11,6 +11,7 @@ export default function ChatComposer({
   ttsOn, onTtsToggle,
   onNewChat,
   isProcessing, onCancel,
+  socialOn,
 }) {
   const [slashItems, setSlashItems] = useState([]);
   const [slashActive, setSlashActive] = useState(0);
@@ -164,8 +165,8 @@ export default function ChatComposer({
       {/* Toggle chip strip */}
       <div className="chat-composer-chips">
         <Toggle label="Screen"        active={screenOn} onClick={onScreenToggle} />
-        <Toggle label="Idle capture"  active={idleOn}   onClick={onIdleToggle} />
-        <Toggle label="Thinking loop" active={loopOn}   onClick={onLoopToggle} />
+        {socialOn && <Toggle label="Idle capture"  active={idleOn}   onClick={onIdleToggle} />}
+        {socialOn && <Toggle label="Thinking loop" active={loopOn}   onClick={onLoopToggle} />}
         <Toggle label="TTS"           active={ttsOn}    onClick={onTtsToggle} />
         <div className="chat-composer-divider" />
         <button type="button" className="chat-new-chat-btn" onClick={onNewChat}>

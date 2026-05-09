@@ -1,4 +1,4 @@
-﻿const micStatus = document.getElementById("micStatus");
+const micStatus = document.getElementById("micStatus");
 const sessionStatus = document.getElementById("sessionStatus");
 const chatLog = document.getElementById("chatLog");
 const interimText = document.getElementById("interimText");
@@ -105,6 +105,7 @@ let attachedImage = null;
 let screenStream = null;
 let screenVideo = null;
 let idleCaptureEnabled = false;
+let socialModeEnabled = localStorage.getItem('socialModeEnabled') === 'true';
 let idleCaptureTimerId = null;
 let idleCaptureInProgress = false;
 let lastSpeechTime = Date.now();
@@ -1909,6 +1910,7 @@ async function sendText(text, options = {}) {
     max_history: chatMaxHistory,
     max_context_tokens: contextMaxTokens,
     max_rag_results: ragTopK,
+    social_mode: socialModeEnabled,
   };
   if (currentProvider) {
     payload.provider = currentProvider;
@@ -3886,6 +3888,50 @@ if (screenshotIntervalInput) {
   });
 }
 
+
+// Social Mode toggle
+(function initSocialMode() {
+  const socialModeToggle = document.getElementById('socialModeToggle');
+  const socialModeSettingsEl = document.getElementById('socialModeSettings');
+
+  function applySocialMode(enabled) {
+    socialModeEnabled = enabled;
+    localStorage.setItem('socialModeEnabled', String(enabled));
+    socialModeToggle?.querySelectorAll('.setting-option').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.value === (enabled ? 'on' : 'off'));
+    });
+    if (socialModeSettingsEl) socialModeSettingsEl.hidden = !enabled;
+    if (!enabled) {
+      setIdleCaptureEnabled(false);
+      if (thinkingLoopEnabled) {
+        thinkingLoopEnabled = false;
+        localStorage.setItem('thinkingLoopEnabled', 'false');
+      }
+    } else {
+      setIdleCaptureEnabled(true);
+      if (!thinkingLoopEnabled) {
+        thinkingLoopEnabled = true;
+        localStorage.setItem('thinkingLoopEnabled', 'true');
+        if (thinkingLoopToggle) {
+          thinkingLoopToggle.classList.remove('off');
+          thinkingLoopToggle.classList.add('active');
+          thinkingLoopToggle.setAttribute('aria-pressed', 'true');
+          thinkingLoopToggle.textContent = 'Thinking loop: on';
+        }
+      }
+    }
+    window.dispatchEvent(new CustomEvent('chat:stateUpdate', {
+      detail: { socialMode: enabled, idleOn: idleCaptureEnabled, loopOn: thinkingLoopEnabled }
+    }));
+  }
+
+  applySocialMode(socialModeEnabled);
+
+  socialModeToggle?.addEventListener('click', e => {
+    const btn = e.target.closest('.setting-option');
+    if (btn) applySocialMode(btn.dataset.value === 'on');
+  });
+}());
 // â”€â”€ VRAM indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function updateVramIndicator() {
@@ -3930,6 +3976,7 @@ window.chatBridge = {
       loopOn: thinkingLoopEnabled,
       ttsOn: ttsEnabled,
       isProcessing: Boolean(activeAbortController),
+      socialMode: socialModeEnabled,
       attachedImage: attachedImage
         ? { dataUrl: attachedImage.dataUrl, name: attachedImage.name }
         : null,

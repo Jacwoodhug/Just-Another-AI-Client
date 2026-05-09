@@ -34,6 +34,7 @@ export function useChatWorkspace() {
   const [ttsOn, setTtsOn]             = useState(() => s0.ttsOn !== false);
   const [isProcessing, setIsProcessing] = useState(() => Boolean(s0.isProcessing));
   const [attachedImage, setAttachedImage] = useState(() => s0.attachedImage || null);
+  const [socialOn, setSocialOn]       = useState(() => Boolean(s0.socialMode));
   const [text, setText] = useState('');
 
   useEffect(() => {
@@ -144,6 +145,7 @@ export function useChatWorkspace() {
       if (typeof s.loopOn      === 'boolean') setLoopOn(s.loopOn);
       if (typeof s.ttsOn       === 'boolean') setTtsOn(s.ttsOn);
       if (typeof s.isProcessing === 'boolean') setIsProcessing(s.isProcessing);
+      if (typeof s.socialMode  === 'boolean') setSocialOn(s.socialMode);
       if ('attachedImage' in s) setAttachedImage(s.attachedImage);
     }
 
@@ -192,7 +194,7 @@ export function useChatWorkspace() {
   return {
     messages, text, setText,
     micActive, screenOn, idleOn, loopOn, ttsOn,
-    isProcessing, attachedImage,
+    isProcessing, attachedImage, socialOn,
     sendMessage, toggleMic, toggleScreen, toggleIdle, toggleLoop, toggleTts,
     newChat, openAttach, clearAttach, cancelRequest,
     regenerateAssistant, deleteLastAssistant, deleteLastExchange, resendText,

@@ -27,6 +27,7 @@ backend/code_history/
 .claude/
 
 IDEAS.md
+*_PLAN.md
 
 # Node / npm
 frontend/node_modules/
