@@ -5,6 +5,7 @@ import {
   deleteImage as apiDelete, bulkDelete as apiBulkDelete, bulkSetFolder as apiBulkSetFolder,
   generateImage as apiGenerate,
 } from '../api/image.js';
+import { getConfig, putConfig, getImageChat, putImageChat } from '../api/config.js';
 
 let _queueId = 0;
 function genQueueId() { return `q-${++_queueId}`; }
@@ -39,7 +40,7 @@ export function useImageWorkspace() {
   const [addingFolder, setAddingFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
 
-  // --- Generation ---
+  // --- Generation (initialize from localStorage; overridden by backend on mount) ---
   const _gs = loadGenSettings();
   const [prompt, setPrompt] = useState(_gs.prompt ?? '');
   const [negPrompt, setNegPrompt] = useState(_gs.negPrompt ?? '');
@@ -52,28 +53,75 @@ export function useImageWorkspace() {
   const [negOpen, setNegOpen] = useState(_gs.negOpen ?? false);
   const [moreOpen, setMoreOpen] = useState(_gs.moreOpen ?? false);
   const [queue, setQueue] = useState([]);
+  const _genSettingsMounted = useRef(false);
 
   // --- Agent Chat ---
   const [chatMessages, setChatMessages] = useState(() => loadChatMessages());
   const [chatInput, setChatInput] = useState('');
+  const _chatMounted = useRef(false);
 
   const abortRefs = useRef({});
 
-  // Persist generation settings
+  // Load gen settings from backend on mount
   useEffect(() => {
+    const cached = window._backendConfig;
+    const apply = (gs) => {
+      if (!gs || typeof gs !== 'object') return;
+      if (gs.prompt !== undefined) setPrompt(gs.prompt);
+      if (gs.negPrompt !== undefined) setNegPrompt(gs.negPrompt);
+      if (gs.enhance !== undefined) setEnhance(gs.enhance);
+      if (gs.seed !== undefined) setSeed(gs.seed);
+      if (gs.lockSeed !== undefined) setLockSeed(gs.lockSeed);
+      if (gs.batchCount !== undefined) setBatchCount(gs.batchCount);
+      if (gs.aspectRatio !== undefined) setAspectRatio(gs.aspectRatio);
+      if (gs.customRes !== undefined) setCustomRes(gs.customRes);
+      if (gs.negOpen !== undefined) setNegOpen(gs.negOpen);
+      if (gs.moreOpen !== undefined) setMoreOpen(gs.moreOpen);
+    };
+    if (cached && cached.imageGenSettings) {
+      apply(cached.imageGenSettings);
+    } else {
+      getConfig().then(cfg => {
+        if (cfg && cfg.imageGenSettings) apply(cfg.imageGenSettings);
+      }).catch(() => {});
+    }
+    _genSettingsMounted.current = true;
+  }, []);
+
+  // Persist generation settings (skip initial mount)
+  const _genSaveTimer = useRef(null);
+  useEffect(() => {
+    if (!_genSettingsMounted.current) return;
     try {
       localStorage.setItem(GEN_STORAGE_KEY, JSON.stringify({
         prompt, negPrompt, enhance, seed, lockSeed, batchCount, aspectRatio, customRes, negOpen, moreOpen,
       }));
     } catch {}
+    clearTimeout(_genSaveTimer.current);
+    _genSaveTimer.current = setTimeout(() => {
+      putConfig({ imageGenSettings: { prompt, negPrompt, enhance, seed, lockSeed, batchCount, aspectRatio, customRes, negOpen, moreOpen } })
+        .catch(() => {});
+    }, 500);
   }, [prompt, negPrompt, enhance, seed, lockSeed, batchCount, aspectRatio, customRes, negOpen, moreOpen]);
 
-  // Persist chat messages (skip transient typing/status entries)
+  // Load chat messages from backend on mount
   useEffect(() => {
-    try {
-      const toSave = chatMessages.filter(m => m.role === 'user' || m.role === 'ai');
-      localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave));
-    } catch {}
+    getImageChat().then(msgs => {
+      if (Array.isArray(msgs) && msgs.length > 0) setChatMessages(msgs);
+    }).catch(() => {});
+    _chatMounted.current = true;
+  }, []);
+
+  // Persist chat messages (skip transient typing/status entries, skip initial mount)
+  const _chatSaveTimer = useRef(null);
+  useEffect(() => {
+    if (!_chatMounted.current) return;
+    const toSave = chatMessages.filter(m => m.role === 'user' || m.role === 'ai');
+    try { localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(toSave)); } catch {}
+    clearTimeout(_chatSaveTimer.current);
+    _chatSaveTimer.current = setTimeout(() => {
+      putImageChat(toSave).catch(() => {});
+    }, 500);
   }, [chatMessages]);
 
   // Load on mount

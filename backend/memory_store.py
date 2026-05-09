@@ -38,6 +38,16 @@ class MemoryStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memory_session ON memory(session_id);"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    personality_id TEXT
+                );
+                """
+            )
 
     def add_message(
         self,
@@ -129,10 +139,70 @@ class MemoryStore:
             return len(ids)
 
     def delete_session(self, session_id: str) -> int:
-        """Delete all messages for the given session. Returns the count deleted."""
+        """Delete all messages for the given session and remove from sessions table. Returns the count deleted."""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
                 "DELETE FROM memory WHERE session_id = ?;",
                 (session_id,),
             )
+            conn.execute("DELETE FROM sessions WHERE id = ?;", (session_id,))
             return cursor.rowcount
+
+    def get_all_sessions(self) -> List[Dict[str, Any]]:
+        """Return all sessions with updated_at derived from latest memory message timestamp."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT s.id, s.name, s.created_at, s.personality_id,
+                       COALESCE(MAX(m.created_at), s.created_at) AS updated_at
+                FROM sessions s
+                LEFT JOIN memory m ON m.session_id = s.id
+                GROUP BY s.id
+                ORDER BY updated_at DESC;
+                """
+            ).fetchall()
+        return [
+            {
+                "id": row[0],
+                "name": row[1],
+                "createdAt": int(row[2] * 1000),
+                "personalityId": row[3],
+                "updatedAt": int(row[4] * 1000),
+            }
+            for row in rows
+        ]
+
+    def upsert_session(self, id: str, name: str, created_at: float, personality_id: Optional[str] = None) -> None:
+        """Insert or update a session metadata entry."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (id, name, created_at, personality_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET name=excluded.name, personality_id=excluded.personality_id;
+                """,
+                (id, name, created_at, personality_id),
+            )
+
+    def get_session_history(self, session_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return all messages for a session (all roles) with their SQLite id."""
+        query = """
+            SELECT id, role, content, created_at FROM memory
+            WHERE session_id = ?
+            ORDER BY id ASC
+        """
+        params: list = [session_id]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {"id": row[0], "role": row[1], "content": row[2], "created_at": row[3]}
+            for row in rows
+        ]
+
+    def delete_message(self, message_id: int) -> None:
+        """Delete a single message row by its SQLite id."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM memory WHERE id = ?;", (message_id,))

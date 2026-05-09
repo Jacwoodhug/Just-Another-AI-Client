@@ -199,6 +199,69 @@ let rawOutputVisible = false;
 let pendingScreenshotDataUrl = "";
 let pendingScreenshotLabel = "";
 
+// ---------------------------------------------------------------------------
+// Backend config cache
+// ---------------------------------------------------------------------------
+let _backendConfig = null;
+
+function _cfg(key, fallback) {
+  if (_backendConfig !== null && Object.prototype.hasOwnProperty.call(_backendConfig, key))
+    return _backendConfig[key];
+  return fallback;
+}
+
+async function loadBackendConfig() {
+  try {
+    const res = await fetch('/api/config');
+    if (res.ok) {
+      _backendConfig = await res.json();
+      window._backendConfig = _backendConfig;
+    }
+  } catch (_) {}
+}
+
+async function saveConfigKey(key, value) {
+  try {
+    await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [key]: value }),
+    });
+  } catch (_) {}
+}
+
+// Session cache
+let _sessionCache = [];
+let _backendSessionsLoaded = false;
+
+async function refreshSessionCache() {
+  try {
+    const res = await fetch('/api/sessions');
+    if (res.ok) {
+      _sessionCache = await res.json();
+      _backendSessionsLoaded = true;
+      return;
+    }
+  } catch (_) {}
+  // Fallback: populate from localStorage only on network error
+  if (!_backendSessionsLoaded) {
+    try {
+      const stored = JSON.parse(localStorage.getItem('chatSessions') || '[]');
+      if (Array.isArray(stored)) _sessionCache = stored;
+    } catch (_) {}
+  }
+}
+
+async function upsertSessionToBackend(session) {
+  try {
+    await fetch('/api/sessions/upsert', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(session),
+    });
+  } catch (_) {}
+}
+
 function isSpeechActive() {
   // Check if user is actively speaking (has pending transcript)
   if (pendingTranscript) {
@@ -233,6 +296,11 @@ function newSession() {
   sessionId = newId;
   localStorage.setItem("sessionId", newId);
   ensureSessionEntry(newId);
+  const now = Date.now();
+  const newSessionObj = { id: newId, name: defaultSessionName(newId), createdAt: now, updatedAt: now };
+  _sessionCache = _sessionCache.filter(s => s.id !== newId);
+  _sessionCache.unshift(newSessionObj);
+  upsertSessionToBackend(newSessionObj);
   setSessionStatusById(newId);
   editingSessionId = null;
   editingSessionDraft = "";
@@ -287,14 +355,6 @@ function setTtsEnabled(enabled) {
     ttsToggle.setAttribute("aria-pressed", String(enabled));
     ttsToggle.classList.toggle("active", enabled);
   }
-  if (voicePill) {
-    voicePill.classList.toggle("tts-hidden", !enabled);
-    voicePill.setAttribute("aria-hidden", String(!enabled));
-  }
-  if (voiceTestBtn) {
-    voiceTestBtn.classList.toggle("tts-hidden", !enabled);
-    voiceTestBtn.setAttribute("aria-hidden", String(!enabled));
-  }
   updateTtsControls();
   localStorage.setItem("ttsEnabled", String(enabled));
   if (!enabled) {
@@ -337,10 +397,10 @@ function updateTtsControls() {
       ? Boolean(window.speechSynthesis && speechSynthesis.getVoices().length)
       : kokoroVoices.length > 0;
   if (voiceSelect) {
-    voiceSelect.disabled = !ttsEnabled || !hasVoices;
+    voiceSelect.disabled = !hasVoices;
   }
   if (voiceTestBtn) {
-    voiceTestBtn.disabled = !ttsEnabled || !hasVoices;
+    voiceTestBtn.disabled = !hasVoices;
   }
 }
 
@@ -491,6 +551,13 @@ function renameSession(id, name) {
   entry.name = trimmed.slice(0, 60);
   entry.updatedAt = Date.now();
   saveSessions(sessions);
+  // Update _sessionCache
+  const cacheEntry = _sessionCache.find(s => s.id === id);
+  if (cacheEntry) {
+    cacheEntry.name = entry.name;
+    cacheEntry.updatedAt = entry.updatedAt;
+  }
+  upsertSessionToBackend(entry);
   if (id === sessionId) {
     setSessionStatusById(id);
   }
@@ -525,7 +592,7 @@ function renderSessionList() {
   if (!sessionList) {
     return;
   }
-  const sessions = getSessions().sort(
+  const sessions = _sessionCache.slice().sort(
     (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)
   );
   sessionList.innerHTML = "";
@@ -669,6 +736,7 @@ function deleteSession(id) {
 
   const sessions = getSessions().filter((session) => session.id !== id);
   saveSessions(sessions);
+  _sessionCache = _sessionCache.filter(s => s.id !== id);
   clearChatHistory(id);
 
   if (editingSessionId === id) {
@@ -742,6 +810,14 @@ function saveOrUpdateImageGroup(saveId, dataUrl) {
     const fallback = history.map(e => e.groupId === saveId ? { role: e.role, text: e.text, groupId: e.groupId } : e);
     try { localStorage.setItem(key, JSON.stringify(fallback)); } catch(_2) {}
   }
+  // Persist to backend
+  const activeP = getActivePersonality();
+  const params = activeP.id && activeP.id !== 'default' ? `?personality_id=${encodeURIComponent(activeP.id)}` : '';
+  fetch(`/api/session/${encodeURIComponent(sessionId)}/image-group${params}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: saveId, imageDataUrls: [..._currentImageGroupDataUrls], personalityName: entry.personalityName }),
+  }).catch(() => {});
   touchSession(sessionId);
 }
 
@@ -820,37 +896,71 @@ function saveChatMessage(role, text, imageDataUrl, personalityName) {
 }
 
 function loadChatHistory() {
-  const key = getChatHistoryKey(sessionId);
-  if (!key) {
+  const sid = sessionId;
+  if (!sid) {
     if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:reload', {}));
     return;
   }
-  let history = [];
-  try {
-    history = JSON.parse(localStorage.getItem(key) || "[]");
-  } catch (error) {
-    history = [];
-  }
-  if (!Array.isArray(history) || history.length === 0) {
-    if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:reload', {}));
-    return;
-  }
-  if (window.__chatReactActive) {
-    window.dispatchEvent(new CustomEvent('chat:reload', {}));
-    return;
-  }
-  chatLog.innerHTML = "";
-  history.forEach((item) => {
-    if (!item || !item.text) {
-      return;
-    }
-    const role = item.role === "assistant" ? "assistant" : "user";
-    if (item.imageDataUrls && Array.isArray(item.imageDataUrls) && item.imageDataUrls.length > 0) {
-      createImageGroupItem(role, item.imageDataUrls, item.personalityName);
-    } else {
-      createChatItem(role, item.text, undefined, item.imageDataUrl || "", item.personalityName);
-    }
-  });
+  // Try to load from backend first
+  const activeP = getActivePersonality();
+  const params = activeP.id && activeP.id !== 'default' ? `?personality_id=${encodeURIComponent(activeP.id)}` : '';
+  fetch(`/api/session/${encodeURIComponent(sid)}/history${params}`)
+    .then(res => res.ok ? res.json() : Promise.reject())
+    .then(rows => {
+      if (window.__chatReactActive) {
+        window.dispatchEvent(new CustomEvent('chat:reload', {}));
+        return;
+      }
+      chatLog.innerHTML = "";
+      rows.forEach((item) => {
+        if (!item) return;
+        if (item.role === 'image_group') {
+          try {
+            const data = JSON.parse(item.content || '{}');
+            if (data.imageDataUrls && Array.isArray(data.imageDataUrls) && data.imageDataUrls.length > 0) {
+              createImageGroupItem('assistant', data.imageDataUrls, data.personalityName);
+            }
+          } catch (_) {}
+          return;
+        }
+        const role = item.role === "assistant" ? "assistant" : "user";
+        let content;
+        try { content = JSON.parse(item.content); } catch (_) { content = item.content; }
+        const text = typeof content === 'string' ? content : (content && content.text) || item.content || '';
+        const imageDataUrl = (content && content.imageDataUrl) || '';
+        const personalityName = (content && content.personalityName) || undefined;
+        if (!text && !imageDataUrl) return;
+        createChatItem(role, text, undefined, imageDataUrl, personalityName);
+      });
+    })
+    .catch(() => {
+      // Fallback to localStorage
+      const key = getChatHistoryKey(sid);
+      if (!key) {
+        if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:reload', {}));
+        return;
+      }
+      let history = [];
+      try { history = JSON.parse(localStorage.getItem(key) || '[]'); } catch (_) { history = []; }
+      if (!Array.isArray(history) || history.length === 0) {
+        if (window.__chatReactActive) window.dispatchEvent(new CustomEvent('chat:reload', {}));
+        return;
+      }
+      if (window.__chatReactActive) {
+        window.dispatchEvent(new CustomEvent('chat:reload', {}));
+        return;
+      }
+      chatLog.innerHTML = "";
+      history.forEach((item) => {
+        if (!item || !item.text) return;
+        const role = item.role === "assistant" ? "assistant" : "user";
+        if (item.imageDataUrls && Array.isArray(item.imageDataUrls) && item.imageDataUrls.length > 0) {
+          createImageGroupItem(role, item.imageDataUrls, item.personalityName);
+        } else {
+          createChatItem(role, item.text, undefined, item.imageDataUrl || "", item.personalityName);
+        }
+      });
+    });
 }
 
 function clearChatHistory(id) {
@@ -2329,7 +2439,7 @@ function populateBrowserVoices() {
     return;
   }
   voiceSelect.innerHTML = "";
-  const storedVoice = localStorage.getItem(getTtsVoiceStorageKey("browser"));
+  const storedVoice = _cfg('ttsVoice', localStorage.getItem(getTtsVoiceStorageKey("browser")));
   const defaultVoice = voices.find((voice) => voice.default) || voices[0];
   const selectedVoice =
     voices.find((voice) => voice.name === storedVoice) || defaultVoice;
@@ -2366,7 +2476,7 @@ async function populateKokoroVoices() {
     if (defaultVoice && !kokoroVoices.includes(defaultVoice)) {
       kokoroVoices.unshift(defaultVoice);
     }
-    const storedVoice = localStorage.getItem(getTtsVoiceStorageKey("kokoro"));
+    const storedVoice = _cfg('ttsVoiceKokoro', localStorage.getItem(getTtsVoiceStorageKey("kokoro")));
     const selectedVoice = kokoroVoices.includes(storedVoice)
       ? storedVoice
       : defaultVoice;
@@ -2401,6 +2511,7 @@ function loadTtsVoices() {
 function setTtsProvider(provider) {
   ttsProvider = normalizeTtsProvider(provider);
   localStorage.setItem(TTS_PROVIDER_STORAGE_KEY, ttsProvider);
+  saveConfigKey('ttsProvider', ttsProvider);
   stopTtsPlayback();
   if (ttsProviderToggle) {
     ttsProviderToggle.textContent = `TTS: ${ttsProviderLabel(ttsProvider)}`;
@@ -2962,6 +3073,7 @@ if (searchMethodToggle) {
     if (!btn) return;
     searchMethod = btn.dataset.value;
     localStorage.setItem(SEARCH_METHOD_KEY, searchMethod);
+    saveConfigKey('searchMethod', searchMethod);
     updateSearchMethodUI();
   });
 }
@@ -2973,6 +3085,7 @@ if (chatMaxHistoryInput) {
     if (!isNaN(val) && val >= 1) {
       chatMaxHistory = val;
       localStorage.setItem(CHAT_MAX_HISTORY_KEY, val);
+      saveConfigKey('chatMaxHistory', val);
     }
   });
 }
@@ -2984,6 +3097,7 @@ if (contextMaxTokensInput) {
     if (!isNaN(val) && val >= 1) {
       contextMaxTokens = val * 1000;
       localStorage.setItem(CONTEXT_MAX_TOKENS_KEY, contextMaxTokens);
+      saveConfigKey('contextMaxTokens', contextMaxTokens);
     }
   });
 }
@@ -2995,6 +3109,7 @@ if (ragTopKInput) {
     if (!isNaN(val) && val >= 0) {
       ragTopK = val;
       localStorage.setItem(RAG_TOP_K_KEY, val);
+      saveConfigKey('ragTopK', val);
     }
   });
 }
@@ -3002,10 +3117,15 @@ if (ragTopKInput) {
 // â”€â”€ Personality system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function loadPersonalities() {
-  try {
-    personalities = JSON.parse(localStorage.getItem(PERSONALITIES_KEY) || "[]");
-  } catch (_) {
-    personalities = [];
+  const stored = _cfg('personalities', null);
+  if (stored !== null && Array.isArray(stored)) {
+    personalities = stored;
+  } else {
+    try {
+      personalities = JSON.parse(localStorage.getItem(PERSONALITIES_KEY) || '[]');
+    } catch (_) {
+      personalities = [];
+    }
   }
   if (!personalities.find((p) => p.id === "default")) {
     personalities.unshift({ ...DEFAULT_PERSONALITY });
@@ -3014,6 +3134,7 @@ function loadPersonalities() {
 
 function savePersonalities() {
   localStorage.setItem(PERSONALITIES_KEY, JSON.stringify(personalities));
+  saveConfigKey('personalities', personalities);
 }
 
 function getActivePersonality() {
@@ -3026,6 +3147,8 @@ function applyPersonalityTts(p) {
     // Write to localStorage before setTtsProvider so that populateKokoroVoices
     // (which reads localStorage after its async fetch) picks up the right voice.
     localStorage.setItem(getTtsVoiceStorageKey(provider), p.ttsVoice);
+    const cfgKey = provider === 'kokoro' ? 'ttsVoiceKokoro' : 'ttsVoice';
+    saveConfigKey(cfgKey, p.ttsVoice);
   }
   setTtsProvider(provider);
 }
@@ -3236,14 +3359,7 @@ async function deletePersonality(id) {
   renderPersonalitySelect();
 }
 
-// Init personalities
-loadPersonalities();
-activePersonalityId = localStorage.getItem(ACTIVE_PERSONALITY_KEY) || "default";
-if (!personalities.find((p) => p.id === activePersonalityId)) {
-  activePersonalityId = "default";
-}
-renderPersonalitySelect();
-renderPersonalityList();
+// Personalities initialized in initApp() after loadBackendConfig()
 
 if (personalitySelect) {
   personalitySelect.addEventListener("change", () => {
@@ -3350,8 +3466,12 @@ if (personalityPickerCreate) {
     const sessionName = p ? `${p.name} session` : "Personality session";
     const now = Date.now();
     const sessions = getSessions();
-    sessions.push({ id: newId, name: sessionName, personalityId: chosenId, createdAt: now, updatedAt: now });
+    const newSessionObj = { id: newId, name: sessionName, personalityId: chosenId, createdAt: now, updatedAt: now };
+    sessions.push(newSessionObj);
     saveSessions(sessions);
+    _sessionCache = _sessionCache.filter(s => s.id !== newId);
+    _sessionCache.unshift(newSessionObj);
+    upsertSessionToBackend(newSessionObj);
     setSessionStatusById(newId);
     editingSessionId = null;
     editingSessionDraft = "";
@@ -3400,6 +3520,7 @@ if (providerToggle) {
     }
     currentProvider = provider;
     localStorage.setItem("llmProvider", currentProvider);
+    saveConfigKey('llmProvider', currentProvider);
     updateProviderButtons(currentProvider);
     loadModels();
   });
@@ -3410,6 +3531,8 @@ if (modelSelect) {
     const selected = modelSelect.value;
     if (selected) {
       localStorage.setItem(getModelStorageKey(currentProvider), selected);
+      const cfgKey = currentProvider === 'openrouter' ? 'openrouterModel' : 'ollamaModel';
+      saveConfigKey(cfgKey, selected);
       setModelStatus(`Model (${providerLabel(currentProvider)}): ${selected}`);
     } else {
       setModelStatus(`Model (${providerLabel(currentProvider)}): default`);
@@ -3421,6 +3544,8 @@ if (voiceSelect) {
   voiceSelect.addEventListener("change", () => {
     if (voiceSelect.value) {
       localStorage.setItem(getTtsVoiceStorageKey(ttsProvider), voiceSelect.value);
+      const cfgKey = ttsProvider === 'kokoro' ? 'ttsVoiceKokoro' : 'ttsVoice';
+      saveConfigKey(cfgKey, voiceSelect.value);
     }
   });
 }
@@ -3761,42 +3886,146 @@ const storedSessionPanelState = localStorage.getItem("sessionPanelOpen");
 setSessionPanelOpen(storedSessionPanelState === "true");
 
 initRecognition();
-sessionId = loadSession();
-applySessionPersonalityLock(sessionId);
-updateThinkingPanel([]);
-clearThinkingMessages();
-setThinkingContext("");
-setThinkingScreenshot("", "");
-clearImage();
-currentProvider = normalizeProvider(localStorage.getItem("llmProvider"));
-updateProviderButtons(currentProvider);
-setProviderBadge(currentProvider);
-loadModels();
-ttsProvider = normalizeTtsProvider(localStorage.getItem(TTS_PROVIDER_STORAGE_KEY));
-setTtsProvider(ttsProvider);
-initVoices();
-// Apply active personality TTS after voices are initialized
-setTimeout(() => applyPersonalityTts(getActivePersonality()), 600);
-setScreenStatus("Screen: off");
-const storedIdle = localStorage.getItem("idleCaptureEnabled");
-setIdleCaptureEnabled(storedIdle === "true");
-startIdleWatcher();
-loadChatHistory();
-const storedTts = localStorage.getItem("ttsEnabled");
-setTtsEnabled(storedTts !== "false");
-const storedThinkingLoop = localStorage.getItem("thinkingLoopEnabled");
-if (storedThinkingLoop === "false") {
-  thinkingLoopEnabled = false;
-  if (thinkingLoopToggle) {
-    thinkingLoopToggle.classList.remove("active");
-    thinkingLoopToggle.classList.add("off");
-    thinkingLoopToggle.setAttribute("aria-pressed", "false");
-    thinkingLoopToggle.textContent = "Thinking loop: off";
+
+// Migration button handler
+const migrateSettingsBtn = document.getElementById('migrateSettingsBtn');
+const migrateSettingsStatus = document.getElementById('migrateSettingsStatus');
+if (migrateSettingsBtn) {
+  migrateSettingsBtn.addEventListener('click', async () => {
+    migrateSettingsBtn.disabled = true;
+    if (migrateSettingsStatus) migrateSettingsStatus.textContent = 'Migrating…';
+    try {
+      // 1. Migrate user config (all localStorage keys)
+      const rawConfig = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k) rawConfig[k] = localStorage.getItem(k);
+      }
+      await fetch('/api/config/migrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ raw: rawConfig }),
+      });
+
+      // 2. Migrate sessions
+      let sessions = [];
+      try { sessions = JSON.parse(localStorage.getItem('chatSessions') || '[]'); } catch (_) { sessions = []; }
+      if (Array.isArray(sessions) && sessions.length > 0) {
+        await fetch('/api/sessions/bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessions }),
+        });
+      }
+
+      // 3. Migrate image chat
+      const rawImgChat = localStorage.getItem('imageWorkspace:chatMessages');
+      if (rawImgChat) {
+        let imgChatMsgs = [];
+        try { imgChatMsgs = JSON.parse(rawImgChat); } catch (_) { imgChatMsgs = []; }
+        if (Array.isArray(imgChatMsgs) && imgChatMsgs.length > 0) {
+          await fetch('/api/image-chat', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(imgChatMsgs),
+          });
+        }
+      }
+
+      // 4. Migrate code workspace state
+      const rawCodeWs = localStorage.getItem('codeWorkspace_v1');
+      if (rawCodeWs) {
+        let codeWsState = null;
+        try { codeWsState = JSON.parse(rawCodeWs); } catch (_) { codeWsState = null; }
+        if (codeWsState && typeof codeWsState === 'object') {
+          await fetch('/api/code/workspace-state', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(codeWsState),
+          });
+        }
+      }
+
+      // 5. Reload config cache
+      const cfgRes = await fetch('/api/config');
+      if (cfgRes.ok) {
+        _backendConfig = await cfgRes.json();
+        window._backendConfig = _backendConfig;
+      }
+
+      if (migrateSettingsStatus) migrateSettingsStatus.textContent = 'Migration complete.';
+    } catch (err) {
+      if (migrateSettingsStatus) migrateSettingsStatus.textContent = 'Migration failed: ' + (err.message || 'unknown error');
+    } finally {
+      migrateSettingsBtn.disabled = false;
+    }
+  });
+}
+
+async function initApp() {
+  await loadBackendConfig();
+
+  // Re-apply config-file values over the synchronous localStorage defaults
+  socialModeEnabled = _cfg('socialModeEnabled', socialModeEnabled);
+  searchMethod      = _cfg('searchMethod', searchMethod);
+  chatMaxHistory    = _cfg('chatMaxHistory', chatMaxHistory);
+  contextMaxTokens  = _cfg('contextMaxTokens', contextMaxTokens);
+  ragTopK           = _cfg('ragTopK', ragTopK);
+
+  loadPersonalities();  // MUST come after loadBackendConfig — reads _cfg('personalities')
+  activePersonalityId = localStorage.getItem(ACTIVE_PERSONALITY_KEY) || "default";
+  if (!personalities.find((p) => p.id === activePersonalityId)) {
+    activePersonalityId = "default";
+  }
+  renderPersonalitySelect();
+  renderPersonalityList();
+
+  sessionId = loadSession();
+  applySessionPersonalityLock(sessionId);
+  updateThinkingPanel([]);
+  clearThinkingMessages();
+  setThinkingContext("");
+  setThinkingScreenshot("", "");
+  clearImage();
+
+  currentProvider = normalizeProvider(_cfg('llmProvider', localStorage.getItem("llmProvider")));
+  updateProviderButtons(currentProvider);
+  setProviderBadge(currentProvider);
+  loadModels();
+
+  ttsProvider = normalizeTtsProvider(_cfg('ttsProvider', localStorage.getItem(TTS_PROVIDER_STORAGE_KEY)));
+  setTtsProvider(ttsProvider);
+  initVoices();
+  // Apply active personality TTS after voices are initialized
+  setTimeout(() => applyPersonalityTts(getActivePersonality()), 600);
+
+  setScreenStatus("Screen: off");
+  const storedIdle = localStorage.getItem("idleCaptureEnabled");
+  setIdleCaptureEnabled(storedIdle === "true");
+  startIdleWatcher();
+  loadChatHistory();
+  const storedTts = localStorage.getItem("ttsEnabled");
+  setTtsEnabled(storedTts !== "false");
+  const storedThinkingLoop = localStorage.getItem("thinkingLoopEnabled");
+  if (storedThinkingLoop === "false") {
+    thinkingLoopEnabled = false;
+    if (thinkingLoopToggle) {
+      thinkingLoopToggle.classList.remove("active");
+      thinkingLoopToggle.classList.add("off");
+      thinkingLoopToggle.setAttribute("aria-pressed", "false");
+      thinkingLoopToggle.textContent = "Thinking loop: off";
+    }
+  }
+
+  await refreshSessionCache();
+  renderSessionList();
+
+  if (sessionPanel && isSessionPanelOpen) {
+    renderSessionList();
   }
 }
-if (sessionPanel && isSessionPanelOpen) {
-  renderSessionList();
-}
+
+initApp();
 
 // Settings tab switching
 (function initSettingsTabs() {
@@ -3897,6 +4126,7 @@ if (screenshotIntervalInput) {
   function applySocialMode(enabled) {
     socialModeEnabled = enabled;
     localStorage.setItem('socialModeEnabled', String(enabled));
+    saveConfigKey('socialModeEnabled', enabled);
     socialModeToggle?.querySelectorAll('.setting-option').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.value === (enabled ? 'on' : 'off'));
     });

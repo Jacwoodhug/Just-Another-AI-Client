@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import * as api from '../api/code.js';
+import { getCodeWorkspaceState, putCodeWorkspaceState } from '../api/config.js';
 
 const LS_KEY = 'codeWorkspace_v1';
 
@@ -56,7 +57,7 @@ export function useCodeWorkspace() {
   useEffect(() => {
     clearTimeout(saveRef.current);
     saveRef.current = setTimeout(() => {
-      saveState({
+      const state = {
         sessionId,
         dirs,
         sel:  [...selected],
@@ -65,9 +66,31 @@ export function useCodeWorkspace() {
         to:   runTimeout,
         cap:  runOutCap,
         log,
-      });
+      };
+      saveState(state);
+      putCodeWorkspaceState(state).catch(() => {});
     }, 200);
   }, [sessionId, dirs, selected, prevented, hidden, runTimeout, runOutCap, log]);
+
+  // Load state from backend on mount (overrides localStorage)
+  useEffect(() => {
+    getCodeWorkspaceState().then(s => {
+      if (!s || typeof s !== 'object') return;
+      if (Array.isArray(s.dirs)) setDirs(s.dirs);
+      if (Array.isArray(s.sel)) setSelected(new Set(s.sel));
+      if (Array.isArray(s.prev)) setPrevented(new Set(s.prev));
+      if (Array.isArray(s.hid)) setHidden(new Set(s.hid));
+      if (s.to !== undefined) setRunTimeout(s.to);
+      if (s.cap !== undefined) setRunOutCap(s.cap);
+      if (Array.isArray(s.log)) {
+        setLog(s.log.map(e =>
+          e.type === 'approval' && !['approved', 'denied', 'expired'].includes(e.status)
+            ? { ...e, status: 'expired' }
+            : e
+        ));
+      }
+    }).catch(() => {});
+  }, []);
 
   // ── Tree ────────────────────────────────────────────────────────────────
   const refreshTree = useCallback(async () => {

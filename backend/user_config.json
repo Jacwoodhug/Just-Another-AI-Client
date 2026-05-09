@@ -1,0 +1,26 @@
+{
+  "socialModeEnabled": false,
+  "searchMethod": "brave",
+  "chatMaxHistory": 20,
+  "contextMaxTokens": 4000,
+  "ragTopK": 4,
+  "ttsProvider": "browser",
+  "ttsVoice": "",
+  "ttsVoiceKokoro": "",
+  "llmProvider": "ollama",
+  "ollamaModel": "",
+  "openrouterModel": "",
+  "personalities": [],
+  "imageGenSettings": {
+    "prompt": "",
+    "negPrompt": "",
+    "enhance": true,
+    "seed": "",
+    "lockSeed": false,
+    "batchCount": 1,
+    "aspectRatio": "1:1",
+    "customRes": "",
+    "negOpen": false,
+    "moreOpen": false
+  }
+}

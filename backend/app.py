@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -73,6 +73,63 @@ CONTEXT_MAX_TOKENS = int(os.getenv("CONTEXT_MAX_TOKENS", "4096"))
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
 EMBED_MAX_CHARS = int(os.getenv("EMBED_MAX_CHARS", "8000"))
 COMFYUI_SETTINGS_FILE = BASE_DIR / "comfyui_settings.json"
+USER_CONFIG_FILE = BASE_DIR / "user_config.json"
+IMAGE_CHAT_FILE = BASE_DIR / "image_chat.json"
+CODE_WORKSPACE_FILE = BASE_DIR / "code_workspace_state.json"
+
+DEFAULT_USER_CONFIG: Dict[str, Any] = {
+    "socialModeEnabled": False,
+    "searchMethod": "searxng",
+    "chatMaxHistory": 20,
+    "contextMaxTokens": 4000,
+    "ragTopK": 4,
+    "ttsProvider": "browser",
+    "ttsVoice": "",
+    "ttsVoiceKokoro": "",
+    "llmProvider": "ollama",
+    "ollamaModel": "",
+    "openrouterModel": "",
+    "personalities": [],
+    "imageGenSettings": {
+        "prompt": "", "negPrompt": "", "enhance": True, "seed": "",
+        "lockSeed": False, "batchCount": 1, "aspectRatio": "1:1",
+        "customRes": "", "negOpen": False, "moreOpen": False,
+    },
+}
+
+
+def _load_user_config() -> Dict[str, Any]:
+    result = {**DEFAULT_USER_CONFIG, "imageGenSettings": {**DEFAULT_USER_CONFIG["imageGenSettings"]}}
+    if USER_CONFIG_FILE.exists():
+        try:
+            stored = json.loads(USER_CONFIG_FILE.read_text(encoding="utf-8"))
+            if isinstance(stored, dict):
+                for k, v in stored.items():
+                    if k == "imageGenSettings" and isinstance(v, dict):
+                        result["imageGenSettings"].update(v)
+                    else:
+                        result[k] = v
+        except Exception:
+            pass
+    return result
+
+
+def _save_user_config(data: Dict[str, Any]) -> None:
+    USER_CONFIG_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_image_chat() -> list:
+    if IMAGE_CHAT_FILE.exists():
+        try:
+            return json.loads(IMAGE_CHAT_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return []
+
+
+def _save_image_chat(messages: list) -> None:
+    IMAGE_CHAT_FILE.write_text(json.dumps(messages, indent=2), encoding="utf-8")
+
 
 # Load active checkpoint from persisted settings (fallback to default)
 def _load_active_checkpoint() -> str:
@@ -881,6 +938,254 @@ def bulk_set_folder(req: BulkFolderRequest):
             entry["folder"] = req.folder
             lib[filename] = entry
         _save_library(lib)
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# User config routes
+# ---------------------------------------------------------------------------
+
+class UserConfigMigrateRequest(BaseModel):
+    socialModeEnabled: Optional[str] = None
+    searchMethod: Optional[str] = None
+    chatMaxHistory: Optional[str] = None
+    contextMaxTokens: Optional[str] = None
+    ragTopK: Optional[str] = None
+    ttsProvider: Optional[str] = None
+    ttsVoice: Optional[str] = None
+    ttsVoiceKokoro: Optional[str] = None
+    llmProvider: Optional[str] = None
+    ollamaModel: Optional[str] = None
+    openrouterModel: Optional[str] = None
+    personalities: Optional[str] = None
+    imageGenSettings: Optional[str] = None
+
+
+@app.get("/api/config")
+def get_user_config() -> Dict[str, Any]:
+    return _load_user_config()
+
+
+@app.put("/api/config")
+def put_user_config(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    current = _load_user_config()
+    known_keys = set(DEFAULT_USER_CONFIG.keys())
+    for k, v in body.items():
+        if k not in known_keys:
+            continue
+        if k == "imageGenSettings" and isinstance(v, dict):
+            current["imageGenSettings"].update(v)
+        else:
+            current[k] = v
+    _save_user_config(current)
+    return current
+
+
+@app.post("/api/config/migrate")
+def migrate_user_config(req: UserConfigMigrateRequest) -> Dict[str, Any]:
+    current = _load_user_config()
+    existing = {}
+    if USER_CONFIG_FILE.exists():
+        try:
+            existing = json.loads(USER_CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+
+    def _str_bool(v: Optional[str]) -> Optional[bool]:
+        if v is None:
+            return None
+        return v.lower() == "true"
+
+    def _str_int(v: Optional[str]) -> Optional[int]:
+        if v is None:
+            return None
+        try:
+            return int(v)
+        except (ValueError, TypeError):
+            return None
+
+    updates: Dict[str, Any] = {}
+    if req.socialModeEnabled is not None and "socialModeEnabled" not in existing:
+        v = _str_bool(req.socialModeEnabled)
+        if v is not None:
+            updates["socialModeEnabled"] = v
+    if req.searchMethod is not None and "searchMethod" not in existing:
+        updates["searchMethod"] = req.searchMethod
+    if req.chatMaxHistory is not None and "chatMaxHistory" not in existing:
+        v = _str_int(req.chatMaxHistory)
+        if v is not None:
+            updates["chatMaxHistory"] = v
+    if req.contextMaxTokens is not None and "contextMaxTokens" not in existing:
+        v = _str_int(req.contextMaxTokens)
+        if v is not None:
+            updates["contextMaxTokens"] = v
+    if req.ragTopK is not None and "ragTopK" not in existing:
+        v = _str_int(req.ragTopK)
+        if v is not None:
+            updates["ragTopK"] = v
+    if req.ttsProvider is not None and "ttsProvider" not in existing:
+        updates["ttsProvider"] = req.ttsProvider
+    if req.ttsVoice is not None and "ttsVoice" not in existing:
+        updates["ttsVoice"] = req.ttsVoice
+    if req.ttsVoiceKokoro is not None and "ttsVoiceKokoro" not in existing:
+        updates["ttsVoiceKokoro"] = req.ttsVoiceKokoro
+    if req.llmProvider is not None and "llmProvider" not in existing:
+        updates["llmProvider"] = req.llmProvider
+    if req.ollamaModel is not None and "ollamaModel" not in existing:
+        updates["ollamaModel"] = req.ollamaModel
+    if req.openrouterModel is not None and "openrouterModel" not in existing:
+        updates["openrouterModel"] = req.openrouterModel
+    if req.personalities is not None and "personalities" not in existing:
+        try:
+            parsed = json.loads(req.personalities)
+            if isinstance(parsed, list):
+                updates["personalities"] = parsed
+        except Exception:
+            pass
+    if req.imageGenSettings is not None and "imageGenSettings" not in existing:
+        try:
+            parsed = json.loads(req.imageGenSettings)
+            if isinstance(parsed, dict):
+                updates["imageGenSettings"] = parsed
+        except Exception:
+            pass
+
+    for k, v in updates.items():
+        if k == "imageGenSettings" and isinstance(v, dict):
+            current["imageGenSettings"].update(v)
+        else:
+            current[k] = v
+    _save_user_config(current)
+    return current
+
+
+# ---------------------------------------------------------------------------
+# Session routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sessions")
+def list_sessions() -> list:
+    return store.get_all_sessions()
+
+
+@app.post("/api/sessions/upsert")
+def upsert_session(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    sid = str(body.get("id", "")).strip()
+    name = str(body.get("name", "")).strip() or f"Session {sid[:8]}"
+    created_at = body.get("createdAt") or body.get("created_at") or (__import__("time").time() * 1000)
+    # createdAt from frontend is in ms; convert to seconds for storage
+    if isinstance(created_at, (int, float)) and created_at > 1e10:
+        created_at = created_at / 1000.0
+    personality_id = body.get("personalityId") or body.get("personality_id") or None
+    if not sid:
+        raise HTTPException(status_code=400, detail="id is required")
+    store.upsert_session(sid, name, float(created_at), personality_id)
+    return {"status": "ok", "id": sid}
+
+
+@app.post("/api/sessions/bulk")
+def bulk_upsert_sessions(body: list = Body(default=[])) -> Dict[str, Any]:
+    count = 0
+    for item in body:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("id", "")).strip()
+        if not sid:
+            continue
+        name = str(item.get("name", "")).strip() or f"Session {sid[:8]}"
+        created_at = item.get("createdAt") or item.get("created_at") or (__import__("time").time() * 1000)
+        if isinstance(created_at, (int, float)) and created_at > 1e10:
+            created_at = created_at / 1000.0
+        personality_id = item.get("personalityId") or item.get("personality_id") or None
+        store.upsert_session(sid, name, float(created_at), personality_id)
+        count += 1
+    return {"status": "ok", "count": count}
+
+
+@app.get("/api/session/{session_id}/history")
+def get_session_history(session_id: str, personality_id: Optional[str] = None) -> list:
+    pid = (personality_id or "default").strip()
+    s = _get_store(pid)
+    return s.get_session_history(session_id)
+
+
+@app.delete("/api/session/{session_id}/message/{message_id}")
+def delete_session_message(session_id: str, message_id: int, personality_id: Optional[str] = None) -> Dict[str, Any]:
+    pid = (personality_id or "default").strip()
+    s = _get_store(pid)
+    s.delete_message(message_id)
+    return {"status": "ok"}
+
+
+@app.post("/api/session/{session_id}/image-group")
+def upsert_image_group(
+    session_id: str,
+    body: Dict[str, Any] = Body(default={}),
+    personality_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    pid = (personality_id or "default").strip()
+    s = _get_store(pid)
+    group_id = str(body.get("groupId", "")).strip()
+    image_data_urls = body.get("imageDataUrls", [])
+    personality_name = body.get("personalityName", None)
+    if not group_id:
+        raise HTTPException(status_code=400, detail="groupId is required")
+    content = json.dumps({"groupId": group_id, "imageDataUrls": image_data_urls, "personalityName": personality_name})
+    # Check if entry already exists; if so update it, else add
+    import sqlite3 as _sqlite3
+    with _sqlite3.connect(s.db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM memory WHERE session_id = ? AND role = 'image_group' AND content LIKE ?",
+            (session_id, f'%"groupId": "{group_id}"%'),
+        ).fetchone()
+        if row:
+            conn.execute("UPDATE memory SET content = ? WHERE id = ?", (content, row[0]))
+        else:
+            conn.execute(
+                "INSERT INTO memory (session_id, role, content, embedding, created_at) VALUES (?, 'image_group', ?, NULL, ?)",
+                (session_id, content, __import__("time").time()),
+            )
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Image chat routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/image-chat")
+def get_image_chat() -> list:
+    return _load_image_chat()
+
+
+@app.put("/api/image-chat")
+def put_image_chat(body: list = Body(default=[])) -> Dict[str, Any]:
+    _save_image_chat(body)
+    return {"status": "ok"}
+
+
+@app.delete("/api/image-chat")
+def delete_image_chat() -> Dict[str, Any]:
+    _save_image_chat([])
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Code workspace state routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/code/workspace-state")
+def get_code_workspace_state() -> Dict[str, Any]:
+    if CODE_WORKSPACE_FILE.exists():
+        try:
+            return json.loads(CODE_WORKSPACE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+@app.put("/api/code/workspace-state")
+def put_code_workspace_state(body: Dict[str, Any] = Body(default={})) -> Dict[str, Any]:
+    CODE_WORKSPACE_FILE.write_text(json.dumps(body, indent=2), encoding="utf-8")
     return {"status": "ok"}
 
 
@@ -2825,8 +3130,8 @@ def list_models(provider: Optional[str] = None) -> ModelListResponse:
 def delete_session(session_id: str, personality_id: Optional[str] = None) -> Dict[str, Any]:
     """Delete all messages for a session and remove its generated images folder."""
     pid = (personality_id or "default").strip()
-    store = _get_store(pid)
-    deleted = store.delete_session(session_id)
+    store_obj = _get_store(pid)
+    deleted = store_obj.delete_session(session_id)
     import shutil
     short_id = session_id.split("-")[0] if session_id else ""
     image_folder = COMFYUI_OUTPUT_DIR / short_id
@@ -2839,8 +3144,8 @@ def delete_session(session_id: str, personality_id: Optional[str] = None) -> Dic
 def delete_last_exchange(session_id: str, personality_id: Optional[str] = None) -> Dict[str, Any]:
     """Delete the last user + assistant message pair for a session (used when deleting a response)."""
     pid = (personality_id or "default").strip()
-    store = _get_store(pid)
-    deleted = store.delete_last_n_messages(session_id, n=2)
+    store_obj = _get_store(pid)
+    deleted = store_obj.delete_last_n_messages(session_id, n=2)
     return {"deleted": deleted}
 
 
@@ -2848,8 +3153,8 @@ def delete_last_exchange(session_id: str, personality_id: Optional[str] = None) 
 def delete_last_assistant(session_id: str, personality_id: Optional[str] = None) -> Dict[str, Any]:
     """Delete only the last assistant message for a session (used when regenerating a response)."""
     pid = (personality_id or "default").strip()
-    store = _get_store(pid)
-    deleted = store.delete_last_n_messages(session_id, n=1)
+    store_obj = _get_store(pid)
+    deleted = store_obj.delete_last_n_messages(session_id, n=1)
     return {"deleted": deleted}
 
 
