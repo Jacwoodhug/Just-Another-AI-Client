@@ -20,6 +20,9 @@ ComfyUI/
 generated_images/
 comfyui_settings.json
 backend/code_history/
+backend/user_config.json
+backend/image_chat.json
+backend/code_workspace_state.json
 
 # IDEs
 .vscode/
