@@ -3,7 +3,17 @@ import { useCodeWorkspace } from '../../hooks/useCodeWorkspace.js';
 import FileTree       from './FileTree.jsx';
 import CodeLog        from './CodeLog.jsx';
 import HistorySettings from './HistorySettings.jsx';
+import FileRawModal   from './FileRawModal.jsx';
 import './CodeWorkspace.css';
+
+const MIN_PANEL_WIDTH = 160;
+const MAX_PANEL_WIDTH = 600;
+const DEFAULT_PANEL_WIDTH = 220;
+
+function getStoredPanelWidth() {
+  try { return parseInt(localStorage.getItem('codeWorkspace_panelWidth')) || DEFAULT_PANEL_WIDTH; }
+  catch { return DEFAULT_PANEL_WIDTH; }
+}
 
 export default function CodeWorkspace() {
   const ws = useCodeWorkspace();
@@ -11,8 +21,11 @@ export default function CodeWorkspace() {
   const [recording, setRecording] = useState(false);
   const [slashItems, setSlashItems] = useState([]);
   const [slashActive, setSlashActive] = useState(0);
+  const [rawViewerPath, setRawViewerPath] = useState(null);  // Feature 10
+  const [panelWidth, setPanelWidth] = useState(getStoredPanelWidth); // Feature 13
   const inputRef = useRef(null);
   const recognitionRef = useRef(null);
+  const dragRef = useRef(null);
 
   // Fetch undo/redo state on mount
   useEffect(() => { ws.fetchUndoRedo(); }, []);
@@ -29,12 +42,36 @@ export default function CodeWorkspace() {
     return () => document.removeEventListener('keydown', onKey);
   }, [ws.doUndo, ws.doRedo]);
 
+  // Feature 13: panel resize via drag
+  function handleResizeStart(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = panelWidth;
+
+    function onMove(e) {
+      const newW = Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, startW + e.clientX - startX));
+      setPanelWidth(newW);
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      try { localStorage.setItem('codeWorkspace_panelWidth', String(panelWidth)); } catch {}
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    dragRef.current = { onMove, onUp };
+  }
+
+  // Persist panel width to localStorage after it stabilizes
+  useEffect(() => {
+    try { localStorage.setItem('codeWorkspace_panelWidth', String(panelWidth)); } catch {}
+  }, [panelWidth]);
+
   function handleSend() {
     const text = inputRef.current?.value || '';
     if (!text.trim()) return;
     if (inputRef.current) inputRef.current.value = '';
     setSlashItems([]);
-    // Route slash commands through the chat bridge
     if (text.trim().startsWith('/')) {
       const handled = window.chatBridge?.tryExecuteSlashCommand?.(text.trim());
       if (handled) return;
@@ -44,10 +81,7 @@ export default function CodeWorkspace() {
 
   function handleInput() {
     const val = inputRef.current?.value || '';
-    if (!val.startsWith('/')) {
-      setSlashItems([]);
-      return;
-    }
+    if (!val.startsWith('/')) { setSlashItems([]); return; }
     const cmds = window.chatBridge?.getSlashCommands?.() || [];
     const query = val.toLowerCase();
     const filtered = cmds.filter(c => c.name.startsWith(query));
@@ -67,16 +101,8 @@ export default function CodeWorkspace() {
 
   function handleKeyDown(e) {
     if (slashItems.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSlashActive(i => (i + 1) % slashItems.length);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSlashActive(i => (i - 1 + slashItems.length) % slashItems.length);
-        return;
-      }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSlashActive(i => (i + 1) % slashItems.length); return; }
+      if (e.key === 'ArrowUp')   { e.preventDefault(); setSlashActive(i => (i - 1 + slashItems.length) % slashItems.length); return; }
       if (e.key === 'Tab') {
         e.preventDefault();
         const cmd = slashItems[slashActive >= 0 ? slashActive : 0];
@@ -89,20 +115,17 @@ export default function CodeWorkspace() {
         if (cmd) applyCodeSlashCmd(cmd);
         return;
       }
-      if (e.key === 'Escape') {
-        setSlashItems([]);
-        return;
-      }
+      if (e.key === 'Escape') { setSlashItems([]); return; }
     }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   }
 
-  function handleInputBlur() {
-    setTimeout(() => setSlashItems([]), 150);
-  }
+  function handleInputBlur() { setTimeout(() => setSlashItems([]), 150); }
 
-  function handleApprove(callId, pathOrCmd) { ws.sendApproval(callId, true, pathOrCmd); }
-  function handleDeny(callId)               { ws.sendApproval(callId, false, ''); }
+  // Feature 4: unified action handler replacing separate approve/deny
+  function handleAction(callId, action, pathOrCmd) {
+    ws.sendApproval(callId, action, pathOrCmd);
+  }
 
   function handleMicMouseDown() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -112,11 +135,7 @@ export default function CodeWorkspace() {
     rec.interimResults = false;
     rec.lang = 'en-US';
     rec.onresult = e => {
-      const t = Array.from(e.results)
-        .slice(e.resultIndex)
-        .map(r => r[0].transcript)
-        .join('')
-        .trim();
+      const t = Array.from(e.results).slice(e.resultIndex).map(r => r[0].transcript).join('').trim();
       if (t && inputRef.current) {
         inputRef.current.value = (inputRef.current.value ? inputRef.current.value + ' ' : '') + t;
       }
@@ -128,18 +147,18 @@ export default function CodeWorkspace() {
   }
 
   function handleMicMouseUp() {
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch {}
-    }
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} }
     setRecording(false);
   }
 
   return (
     <>
-      {/* Left panel: file tree */}
+      {/* Left panel: Project Files (Feature 13: resizable) */}
       <FileTree
         treeData={ws.treeData}
-        dirs={ws.dirs}
+        projects={ws.projects}
+        activeProjectId={ws.activeProjectId}
+        globalFiles={ws.globalFiles}
         selected={ws.selected}
         prevented={ws.prevented}
         hidden={ws.hidden}
@@ -148,7 +167,16 @@ export default function CodeWorkspace() {
         onToggleSelected={ws.toggleSelected}
         onTogglePrevented={ws.togglePrevented}
         onToggleHidden={ws.toggleHidden}
+        onAddGlobalFile={ws.addGlobalFile}
+        onRemoveGlobalFile={ws.removeGlobalFile}
+        onCreateProject={ws.createProject}
+        onDeleteProject={ws.deleteProject}
+        onRenameProject={ws.renameProject}
+        onSetActiveProject={ws.setActiveProject}
         onSettingsClick={() => setShowSettings(s => !s)}
+        onOpenRaw={setRawViewerPath}
+        panelWidth={panelWidth}
+        onResizeStart={handleResizeStart}
       />
 
       {/* Middle panel: log + composer */}
@@ -162,9 +190,7 @@ export default function CodeWorkspace() {
             disabled={!ws.undoSummary}
             title={ws.undoSummary ? `Undo: ${ws.undoSummary}` : 'Nothing to undo'}
             onClick={ws.doUndo}
-          >
-            ↶ Undo
-          </button>
+          >↶ Undo</button>
           <button
             className="code-redo-btn"
             id="codeRedoBtn"
@@ -172,17 +198,14 @@ export default function CodeWorkspace() {
             disabled={!ws.redoSummary}
             title={ws.redoSummary ? `Redo: ${ws.redoSummary}` : 'Nothing to redo'}
             onClick={ws.doRedo}
-          >
-            ↷ Redo
-          </button>
+          >↷ Redo</button>
         </div>
 
         {/* Log */}
-        <CodeLog log={ws.log} onApprove={handleApprove} onDeny={handleDeny} />
+        <CodeLog log={ws.log} onAction={handleAction} running={ws.running} />
 
         {/* Composer */}
         <div className="code-composer" id="codeComposer">
-          {/* Slash command menu */}
           {slashItems.length > 0 && (
             <div className="slash-menu" role="listbox" aria-label="Slash commands">
               <ul className="slash-list">
@@ -256,6 +279,13 @@ export default function CodeWorkspace() {
           onClearAll={() => { if (confirm('Clear ALL code workspace history? This cannot be undone.')) ws.doClearHistory(false); }}
         />
       )}
+
+      {/* Feature 10: File Raw Viewer Modal */}
+      {rawViewerPath && (
+        <FileRawModal path={rawViewerPath} onClose={() => setRawViewerPath(null)} />
+      )}
     </>
   );
 }
+
+

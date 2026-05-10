@@ -34,9 +34,17 @@ export function readFile(path) {
   return _get('/api/code/read?path=' + encodeURIComponent(path));
 }
 
-/** Approve or deny the pending tool call */
-export function approve(codeSessionId, callId, approved) {
-  return _post('/api/code/approve', { code_session_id: codeSessionId, call_id: callId, approved });
+/**
+ * Approve or deny the pending tool call.
+ * action: 'allow_once' | 'allow_add_scope' | 'deny'
+ */
+export function approve(codeSessionId, callId, action) {
+  return _post('/api/code/approve', { code_session_id: codeSessionId, call_id: callId, action });
+}
+
+/** Open a file location in the system file explorer */
+export function openLocation(path) {
+  return _get('/api/code/open-location?path=' + encodeURIComponent(path));
 }
 
 /** Undo the last change group */

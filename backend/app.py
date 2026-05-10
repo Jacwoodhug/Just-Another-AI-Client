@@ -601,9 +601,43 @@ CODE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "replaceLines",
+            "description": "Replace a range of lines in a file with new content. Requires user approval. Prefer this over writeFile for partial edits. IMPORTANT: new_content must be the literal verbatim replacement text — never a description or placeholder like '[file with X changed to Y]'. Read the file first with readFile, compute the exact new text, then call this tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Absolute path to the file."},
+                    "start_line": {"type": "integer", "description": "1-indexed first line to replace (inclusive)."},
+                    "end_line": {"type": "integer", "description": "1-indexed last line to replace (inclusive)."},
+                    "new_content": {"type": "string", "description": "The exact literal text that will be written to the file at the specified line range. Must be real code/content — NEVER a description, summary, or placeholder of what the content should be."},
+                    "summary": {"type": "string", "description": "Reason for the change (shown to user for approval)."},
+                },
+                "required": ["path", "start_line", "end_line", "new_content", "summary"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "moveFile",
+            "description": "Move or rename a file. Both source and destination must be inside the workspace. Requires user approval.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "Absolute path to the source file."},
+                    "destination": {"type": "string", "description": "Absolute path to the destination."},
+                    "summary": {"type": "string", "description": "Reason for moving this file (shown to user for approval)."},
+                },
+                "required": ["source", "destination", "summary"],
+            },
+        },
+    },
 ]
 
-_CODE_APPROVAL_TOOLS = {"writeFile", "createFile", "deleteFile", "runCommand"}
+_CODE_APPROVAL_TOOLS = {"writeFile", "createFile", "deleteFile", "runCommand", "replaceLines", "moveFile"}
 _CODE_READ_ONLY_TOOLS = {"readFile", "findFiles", "listDirectory", "searchInFile"}
 _CODE_SKIPPED_BINARY = "[Skipped: file too large or binary]"
 _CODE_FILE_SIZE_LIMIT = 5 * 1024 * 1024  # 5 MB
@@ -634,6 +668,7 @@ class ChatRequest(BaseModel):
     run_timeout_seconds: Optional[int] = 30
     run_output_cap_kb: Optional[int] = 50
     social_mode: Optional[bool] = False
+    is_code_session: Optional[bool] = False
 
 
 class ChatResponse(BaseModel):
@@ -2429,10 +2464,12 @@ and editing the user's codebase, plus the full set of base tools.
                                   match with 2 lines of context before and after.
 
 ── Code tools (require user approval — `summary` field required) ────────────────────
-  writeFile(path, content, summary)   — overwrite a file
-  createFile(path, content, summary)  — create a new file
-  deleteFile(path, summary)           — delete a file
-  runCommand(command, cwd, summary)   — run a shell command inside the workspace
+  writeFile(path, content, summary)        — overwrite a file
+  createFile(path, content, summary)       — create a new file
+  deleteFile(path, summary)                — delete a file
+  replaceLines(path, start_line, end_line, new_content, summary) — replace a line range (new_content must be literal text, never a placeholder)
+  moveFile(source, destination, summary)   — move or rename a file
+  runCommand(command, cwd, summary)        — run a shell command inside the workspace
 
 ── Base tools (always available, use as normal) ─────────────────────────────────────
   webSearch — look up documentation, APIs, or anything you need to research.
@@ -2521,7 +2558,7 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
 
     # Store message history (bare user prompt + short spoken text only)
     active_store.add_message(code_session_id, "user", user_text, None)
-    spoken, _ = _parse_sections(final_text)
+    spoken, silent_text = _parse_sections(final_text)
     spoken_text = spoken or final_text
     _CODE_CODE_FENCE_RE = re.compile(r"```")
     _CODE_INDENT_RE = re.compile(r"^[ \t]{2,}", re.MULTILINE)
@@ -2533,12 +2570,13 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
         active_store.add_message(code_session_id, "assistant", spoken_text, None)
 
     undo_s, redo_s = _undo_redo_summaries(code_session_id)
+    context_debug = _build_context_debug(messages)
 
     if pending_approval:
         return ChatResponse(
             session_id=code_session_id,
             assistant_text=spoken_text,
-            silent_text="",
+            silent_text=silent_text,
             speak=False,
             tool_calls_made=tool_calls_made,
             provider=provider,
@@ -2548,16 +2586,23 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
                 "path_or_command": pending_approval.get("path_or_command", ""),
                 "summary": pending_approval["summary"],
                 "warnings": pending_approval.get("warnings", []),
+                "out_of_scope": pending_approval.get("out_of_scope", False),
+                "source": pending_approval.get("args", {}).get("source", ""),
+                "destination": pending_approval.get("args", {}).get("destination", ""),
+                "command": pending_approval.get("args", {}).get("command", ""),
+                "cwd": pending_approval.get("args", {}).get("cwd", ""),
             },
             auto_executed=auto_exec,
             next_undo_summary=undo_s,
             next_redo_summary=redo_s,
+            context_debug=context_debug,
+            raw_output=final_text,
         )
 
     return ChatResponse(
         session_id=code_session_id,
         assistant_text=spoken_text,
-        silent_text="",
+        silent_text=silent_text,
         speak=bool(spoken_text),
         tool_calls_made=tool_calls_made,
         provider=provider,
@@ -2565,6 +2610,8 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
         auto_executed=auto_exec,
         next_undo_summary=undo_s,
         next_redo_summary=redo_s,
+        context_debug=context_debug,
+        raw_output=final_text,
     )
 
 
@@ -4075,7 +4122,7 @@ def _run_code_tool_loop(
             name, args, call_id = _normalize_tool_call(tc, provider)
 
             # 1. Hidden check
-            path_arg = str(args.get("path") or args.get("directory") or args.get("cwd") or "")
+            path_arg = str(args.get("path") or args.get("directory") or args.get("cwd") or args.get("source") or "")
             if path_arg and name not in ("runCommand",) and _is_path_hidden(path_arg, hidden_paths):
                 result_text = f"[Hidden] The path '{path_arg}' does not exist in the accessible file tree."
                 completed_results.append((call_id, name, result_text))
@@ -4087,14 +4134,31 @@ def _run_code_tool_loop(
                 check_path = path_arg
                 if name == "createFile":
                     check_path = str(Path(path_arg).parent) if path_arg else ""
+                if name == "moveFile":
+                    # check destination scope (source is checked later)
+                    check_path = str(args.get("destination", ""))
                 if check_path and not _is_path_allowed(check_path, workspace_dirs):
-                    result_text = f"[Out of scope] The path '{check_path}' is not in the loaded workspace."
-                    completed_results.append((call_id, name, result_text))
-                    tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
+                    if name in _CODE_APPROVAL_TOOLS:
+                        # Feature 4: out_of_scope — send to approval queue with flag
+                        summary = str(args.get("summary") or "(no reason given)")
+                        path_or_cmd = str(args.get("command") or "") if name == "runCommand" else (path_arg or "")
+                        pending_queue.append({
+                            "call_id": call_id,
+                            "name": name,
+                            "args": args,
+                            "summary": summary,
+                            "path_or_command": path_or_cmd,
+                            "warnings": [],
+                            "out_of_scope": True,
+                        })
+                    else:
+                        result_text = f"[Out of scope] The path '{check_path}' is not in the loaded workspace."
+                        completed_results.append((call_id, name, result_text))
+                        tool_calls_made.append({"name": name, "args": args, "result_summary": result_text[:200]})
                     continue
 
             # 3. Prevented check
-            if name in ("writeFile", "createFile", "deleteFile") and path_arg:
+            if name in ("writeFile", "createFile", "deleteFile", "replaceLines", "moveFile") and path_arg:
                 if _is_path_prevented(path_arg, prevented_paths):
                     result_text = f"[Edit prevented] The file '{path_arg}' has been marked as protected."
                     completed_results.append((call_id, name, result_text))
@@ -4118,7 +4182,7 @@ def _run_code_tool_loop(
 
             # 6. Approval-required tool → enqueue
             summary = str(args.get("summary") or "(no reason given)")
-            path_or_cmd = path_arg or str(args.get("command") or "")
+            path_or_cmd = str(args.get("command") or "") if name == "runCommand" else (path_arg or str(args.get("command") or ""))
             warnings: List[str] = []
             if name == "runCommand":
                 cmd_str = str(args.get("command") or "")
@@ -4177,6 +4241,47 @@ def _apply_approved_write(
     """
     original_content: Optional[str] = None
     new_content: Optional[str] = None
+
+    if name == "replaceLines":  # Feature 9
+        path = str(args.get("path", ""))
+        start_line = int(args.get("start_line", 1))
+        end_line = int(args.get("end_line", start_line))
+        replacement = str(args.get("new_content", ""))
+        try:
+            p = Path(path)
+            original_content = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+            lines = original_content.splitlines(keepends=True)
+            # Clamp to valid range
+            s = max(1, start_line) - 1
+            e = min(len(lines), end_line)
+            replacement_lines = replacement.splitlines(keepends=True)
+            if replacement_lines and not replacement_lines[-1].endswith("\n"):
+                replacement_lines[-1] += "\n"
+            new_lines = lines[:s] + replacement_lines + lines[e:]
+            new_content = "".join(new_lines)
+            _record_inflight_before(code_session_id, path, "write", original_content)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(new_content, encoding="utf-8")
+            return f"Lines {start_line}-{end_line} replaced in: {path}", original_content, new_content
+        except Exception as exc:
+            return f"Error replacing lines: {exc}", original_content, new_content
+
+    if name == "moveFile":  # Feature 11
+        source = str(args.get("source", ""))
+        destination = str(args.get("destination", ""))
+        import shutil as _shutil
+        try:
+            src_p = Path(source)
+            original_content = src_p.read_text(encoding="utf-8", errors="replace") if src_p.exists() else ""
+            _record_inflight_before(code_session_id, source, "delete", original_content)
+            _record_inflight_before(code_session_id, destination, "create", "")
+            dest_p = Path(destination)
+            dest_p.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.move(str(src_p), str(dest_p))
+            new_content = original_content
+            return f"File moved: {source} → {destination}", original_content, new_content
+        except Exception as exc:
+            return f"Error moving file: {exc}", original_content, new_content
 
     if name == "writeFile":
         path = str(args.get("path", ""))
@@ -4347,7 +4452,7 @@ def code_read_file(path: str) -> Dict[str, Any]:
 class CodeApproveRequest(BaseModel):
     code_session_id: str
     call_id: str
-    approved: bool
+    action: str  # 'allow_once' | 'allow_add_scope' | 'deny'
 
 
 @app.post("/api/code/approve", response_model=ChatResponse)
@@ -4382,9 +4487,16 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
     original_content: Optional[str] = None
     new_content: Optional[str] = None
 
-    if request.approved:
+    if request.action in ("allow_once", "allow_add_scope"):
         run_timeout = state.get("run_timeout", 30)
         run_output_cap_kb = state.get("run_output_cap_kb", 50)
+        # If allow_add_scope, expand workspace_dirs to include the path
+        if request.action == "allow_add_scope":
+            target_path = item.get("path_or_command") or args.get("path") or args.get("source") or ""
+            if target_path:
+                new_dir = str(Path(target_path).parent)
+                if new_dir not in state["workspace_dirs"]:
+                    state["workspace_dirs"] = list(state["workspace_dirs"]) + [new_dir]
         result_text, original_content, new_content = _apply_approved_write(
             name, args, sid, run_timeout, run_output_cap_kb
         )
@@ -4411,9 +4523,15 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
                 "path_or_command": next_item.get("path_or_command", ""),
                 "summary": next_item["summary"],
                 "warnings": next_item.get("warnings", []),
+                "out_of_scope": next_item.get("out_of_scope", False),
+                "source": next_item.get("args", {}).get("source", ""),
+                "destination": next_item.get("args", {}).get("destination", ""),
+                "command": next_item.get("args", {}).get("command", ""),
+                "cwd": next_item.get("args", {}).get("cwd", ""),
             },
             next_undo_summary=undo_s,
             next_redo_summary=redo_s,
+            context_debug=_build_context_debug(state["messages"]),
         )
 
     # Queue drained — resume the tool loop
@@ -4439,6 +4557,9 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
 
     tools = _build_tool_definitions(COMFYUI_CHECKPOINT) + CODE_TOOL_DEFINITIONS
 
+    # Track the just-approved/denied tool as the first entry in this response's tool calls
+    approved_tool_entry = {"name": name, "args": args, "result_summary": result_text[:200]}
+
     try:
         final_text, more_calls, next_approval, auto_exec = _run_code_tool_loop(
             messages, tools, model, provider, active_yaml_store, search_method,
@@ -4448,6 +4569,10 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
         final_text = f"Error: {exc}"
         next_approval = None
         auto_exec = []
+        more_calls = []
+
+    # Prepend the approved tool so the thinking panel shows it
+    all_calls = [approved_tool_entry] + (more_calls or [])
 
     # Commit group if loop fully done
     change_id: Optional[str] = None
@@ -4458,12 +4583,17 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
 
     undo_s, redo_s = _undo_redo_summaries(sid)
 
+    context_debug = _build_context_debug(messages)
+
+    spoken_resume, silent_resume = _parse_sections(final_text)
+
     if next_approval:
         return ChatResponse(
             session_id=sid,
-            assistant_text=final_text,
-            silent_text="",
+            assistant_text=spoken_resume or final_text,
+            silent_text=silent_resume,
             speak=False,
+            tool_calls_made=all_calls,
             original_content=original_content,
             new_content=new_content,
             pending_tool_approval={
@@ -4472,24 +4602,33 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
                 "path_or_command": next_approval.get("path_or_command", ""),
                 "summary": next_approval["summary"],
                 "warnings": next_approval.get("warnings", []),
+                "out_of_scope": next_approval.get("out_of_scope", False),
+                "source": next_approval.get("args", {}).get("source", ""),
+                "destination": next_approval.get("args", {}).get("destination", ""),
+                "command": next_approval.get("args", {}).get("command", ""),
+                "cwd": next_approval.get("args", {}).get("cwd", ""),
             },
             auto_executed=auto_exec,
             next_undo_summary=undo_s,
             next_redo_summary=redo_s,
+            context_debug=context_debug,
+            raw_output=final_text,
         )
 
-    spoken, _ = _parse_sections(final_text)
     return ChatResponse(
         session_id=sid,
-        assistant_text=spoken or final_text,
-        silent_text="",
-        speak=bool(spoken or final_text),
+        assistant_text=spoken_resume or final_text,
+        silent_text=silent_resume,
+        speak=bool(spoken_resume or final_text),
+        tool_calls_made=all_calls,
         original_content=original_content,
         new_content=new_content,
         change_id=change_id,
         auto_executed=auto_exec,
         next_undo_summary=undo_s,
         next_redo_summary=redo_s,
+        context_debug=context_debug,
+        raw_output=final_text,
     )
 
 
@@ -4526,7 +4665,8 @@ def code_undo(request: CodeUndoRedoRequest) -> Dict[str, Any]:
             restored_files.append(path)
         except Exception:
             pass
-    return {"ok": True, "restored_files": restored_files, "change_id": change_id}
+    undo_s, redo_s = _undo_redo_summaries(sid)
+    return {"ok": True, "restored_files": restored_files, "change_id": change_id, "next_undo_summary": undo_s, "next_redo_summary": redo_s}
 
 
 @app.post("/api/code/redo")
@@ -4558,7 +4698,27 @@ def code_redo(request: CodeUndoRedoRequest) -> Dict[str, Any]:
             restored_files.append(path)
         except Exception:
             pass
-    return {"ok": True, "restored_files": restored_files, "change_id": change_id}
+    undo_s, redo_s = _undo_redo_summaries(sid)
+    return {"ok": True, "restored_files": restored_files, "change_id": change_id, "next_undo_summary": undo_s, "next_redo_summary": redo_s}
+
+
+@app.get("/api/code/open-location")
+def code_open_location(path: str) -> Dict[str, Any]:
+    """Feature 12: Open a file/folder in Windows Explorer, selecting it."""
+    try:
+        p = Path(path)
+        if not p.is_absolute():
+            return {"ok": False, "error": "Path must be absolute"}
+        if not p.exists():
+            return {"ok": False, "error": "Path does not exist"}
+        # Validate path is a real filesystem path (prevent injection)
+        resolved = str(p.resolve())
+        # Pass as a single string so Windows shell handles the /select,<path>
+        # argument correctly even when the path contains spaces.
+        subprocess.Popen(f'explorer /select,"{resolved}"', shell=True)
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 class CodeRevertRequest(BaseModel):

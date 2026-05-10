@@ -4262,6 +4262,9 @@ window.chatBridge = {
 window.updateCodeThinking = function(data) {
   const toolCallsMade = Array.isArray(data.tool_calls_made) ? data.tool_calls_made : [];
   updateThinkingPanel(toolCallsMade);
+  if (data.silent_text && data.silent_text.trim()) {
+    addThinkingMessage(data.silent_text.trim());
+  }
   setRawOutput(data.raw_output || '');
   setThinkingContext(data.context_debug || '');
   updateThinkingTokenEstimate(data.context_debug || '');

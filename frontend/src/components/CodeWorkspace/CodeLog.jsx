@@ -1,12 +1,11 @@
 import { useRef, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import ApprovalBlock from './blocks/ApprovalBlock.jsx';
 import DiffBlock     from './blocks/DiffBlock.jsx';
 import ConsoleBlock  from './blocks/ConsoleBlock.jsx';
 import InfoBlock     from './blocks/InfoBlock.jsx';
+import ChatBubble    from '../shared/ChatBubble.jsx';
 
-function BulkBar({ log, onApprove, onDeny }) {
+function BulkBar({ log, onAction }) {
   const pending = log.filter(
     e => e.type === 'approval' && !['approved', 'denied', 'expired'].includes(e.status) && e.approval
   );
@@ -20,13 +19,13 @@ function BulkBar({ log, onApprove, onDeny }) {
       <div className="code-bulk-bar-actions">
         <button
           className="code-approve-btn"
-          onClick={() => pending.forEach(e => onApprove(e.approval.call_id, e.approval.path_or_command))}
+          onClick={() => pending.forEach(e => onAction(e.approval.call_id, 'allow_once', e.approval.path_or_command))}
         >
           ✓ Approve all
         </button>
         <button
           className="code-deny-btn"
-          onClick={() => pending.forEach(e => onDeny(e.approval.call_id))}
+          onClick={() => pending.forEach(e => onAction(e.approval.call_id, 'deny', ''))}
         >
           ✕ Deny all
         </button>
@@ -35,14 +34,14 @@ function BulkBar({ log, onApprove, onDeny }) {
   );
 }
 
-export default function CodeLog({ log, onApprove, onDeny }) {
+export default function CodeLog({ log, onAction, running }) {
   const bottomRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [log]);
+  }, [log, running]);
 
-  if (!log.length) {
+  if (!log.length && !running) {
     return (
       <div className="code-log" id="codeLog">
         <div className="code-log-empty" id="codeLogEmpty">No activity yet</div>
@@ -52,39 +51,39 @@ export default function CodeLog({ log, onApprove, onDeny }) {
 
   return (
     <div className="code-log" id="codeLog">
-      <BulkBar log={log} onApprove={onApprove} onDeny={onDeny} />
-      {log.map((entry, i) => (
-        <LogEntry key={i} entry={entry} onApprove={onApprove} onDeny={onDeny} />
+      <BulkBar log={log} onAction={onAction} />
+      {log.map(entry => (
+        // Feature 7: use stable entry.id as key instead of array index
+        <LogEntry key={entry.id || entry.type + Math.random()} entry={entry} onAction={onAction} />
       ))}
+      {running && (
+        <div className="code-log-typing">
+          <div className="typing-indicator">
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+          </div>
+        </div>
+      )}
       <div ref={bottomRef} />
     </div>
   );
 }
 
-function LogEntry({ entry, onApprove, onDeny }) {
+function LogEntry({ entry, onAction }) {
+  // Feature 2: use shared ChatBubble for user and text entries
   if (entry.type === 'user') {
-    return (
-      <div className="chat-item user" style={{ whiteSpace: 'pre-wrap' }}>
-        {entry.text}
-      </div>
-    );
+    return <ChatBubble role="user" text={entry.text} />;
   }
 
   if (entry.type === 'text') {
-    const md = entry.text ? entry.text.replace(/^\n+/, '') : '';
-    return (
-      <div className="chat-item assistant">
-        <div className="chat-markdown">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{md}</ReactMarkdown>
-        </div>
-      </div>
-    );
+    return <ChatBubble role="assistant" text={entry.text} />;
   }
 
   if (entry.type === 'approval') {
     return (
       <div className="code-log-block">
-        <ApprovalBlock entry={entry} onApprove={onApprove} onDeny={onDeny} />
+        <ApprovalBlock entry={entry} onAction={onAction} />
       </div>
     );
   }
@@ -103,3 +102,4 @@ function LogEntry({ entry, onApprove, onDeny }) {
 
   return null;
 }
+

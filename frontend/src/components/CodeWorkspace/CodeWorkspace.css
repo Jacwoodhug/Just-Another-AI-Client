@@ -258,6 +258,27 @@
   padding: 0 12px 4px;
 }
 
+.code-approval-command {
+  margin: 4px 12px 6px;
+  padding: 8px 11px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-family: 'Space Mono', monospace;
+  font-size: 12px;
+  color: #c3f0a0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+.code-approval-cwd {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 12px 4px;
+  opacity: 0.7;
+}
+
 .code-approval-warning {
   display: flex;
   align-items: center;
@@ -700,3 +721,330 @@
   flex-shrink: 0;
   line-height: 1;
 }
+
+/* ── Feature 13: resizable panel ────────────────────────────────────────── */
+.code-file-tree { position: relative; }
+
+.code-panel-resizer {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 10;
+  transition: background 0.15s;
+}
+.code-panel-resizer:hover,
+.code-panel-resizer:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ── Feature: Project nodes in FileTree ─────────────────────────────────── */
+.code-project-node { display: flex; flex-direction: column; }
+
+.code-project-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px 5px 6px;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  border-radius: 5px;
+  margin: 1px 4px;
+  user-select: none;
+  transition: background 0.1s;
+}
+.code-project-header:hover { background: rgba(255, 255, 255, 0.05); }
+.code-project-header.active {
+  background: rgba(212, 120, 42, 0.15);
+  border-left-color: var(--accent);
+}
+.code-project-header.active:hover {
+  background: rgba(212, 120, 42, 0.25);
+}
+
+.code-project-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+.code-project-header.active .code-project-dot { background: var(--accent); }
+
+.code-project-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-project-arrow {
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+.code-project-arrow.open { transform: rotate(90deg); }
+
+.code-project-rename-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--ink);
+  font-size: 12px;
+  padding: 1px 5px;
+  outline: none;
+}
+
+.code-project-body {
+  padding-left: 16px;
+}
+
+.code-project-add-dir {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0.7;
+  transition: opacity 0.1s;
+}
+.code-project-add-dir:hover { opacity: 1; }
+
+/* New project input row */
+.code-new-project-row {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  gap: 4px;
+}
+.code-new-project-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--ink);
+  font-size: 12px;
+  padding: 3px 7px;
+  outline: none;
+}
+
+/* ── Global Files section ────────────────────────────────────────────────── */
+.code-global-files-section { margin-top: 8px; }
+
+.code-global-files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  border-top: 1px solid var(--stroke);
+}
+.code-global-files-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+
+/* ── Context menu separator ──────────────────────────────────────────────── */
+.code-ctx-separator {
+  height: 1px;
+  background: var(--stroke);
+  margin: 3px 6px;
+}
+.code-ctx-item.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ── Feature 4: Out-of-scope "Allow & Add" button ───────────────────────── */
+.code-add-scope-btn {
+  background: rgba(100, 160, 255, 0.15) !important;
+  border-color: rgba(100, 160, 255, 0.4) !important;
+  color: #9dc4f8 !important;
+}
+.code-add-scope-btn:hover {
+  background: rgba(100, 160, 255, 0.25) !important;
+}
+
+/* ── Feature 3: Cross-project warning ───────────────────────────────────── */
+.code-cross-project-warning {
+  background: rgba(160, 100, 255, 0.1);
+  border-color: rgba(160, 100, 255, 0.35);
+  color: #c9a8f8;
+}
+
+/* ── Feature 11: Move arrow in approval block ───────────────────────────── */
+.code-move-arrow {
+  color: var(--muted);
+  font-weight: 400;
+  padding: 0 4px;
+}
+
+/* ── Feature 10: File raw viewer modal ───────────────────────────────────── */
+.code-raw-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(4, 3, 2, 0.72);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.code-raw-modal {
+  background: rgba(18, 13, 8, 0.99);
+  border: 1px solid var(--stroke);
+  border-radius: 14px;
+  box-shadow: 0 24px 72px rgba(4, 3, 2, 0.7);
+  display: flex;
+  flex-direction: column;
+  max-width: 880px;
+  width: 100%;
+  max-height: 80vh;
+  overflow: hidden;
+}
+
+.code-raw-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 11px;
+  border-bottom: 1px solid var(--stroke);
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+.code-raw-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-raw-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.code-raw-copy-btn {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  color: var(--muted);
+  border: 1px solid var(--stroke);
+  background: transparent;
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+}
+.code-raw-copy-btn:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.code-raw-copy-btn:disabled { opacity: 0.4; cursor: default; }
+
+.code-raw-close-btn {
+  font-size: 14px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 5px;
+  transition: color 0.1s, background 0.1s;
+}
+.code-raw-close-btn:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.code-raw-modal-body {
+  flex: 1;
+  overflow: auto;
+  padding: 0;
+}
+
+.code-raw-content {
+  display: flex;
+  min-height: 100%;
+}
+
+.code-raw-gutter {
+  flex-shrink: 0;
+  padding: 14px 10px 14px 14px;
+  text-align: right;
+  user-select: none;
+  border-right: 1px solid var(--stroke);
+  background: rgba(0,0,0,0.2);
+}
+
+.code-raw-lineno {
+  font-family: 'Fira Code', 'Consolas', monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--muted);
+  opacity: 0.5;
+}
+
+.code-raw-pre {
+  font-family: 'Fira Code', 'Consolas', monospace;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--ink);
+  white-space: pre;
+  margin: 0;
+  padding: 14px 16px;
+  flex: 1;
+}
+
+.code-raw-modal-footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border-top: 1px solid var(--stroke);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.code-raw-footer-sep {
+  opacity: 0.4;
+}
+
+.code-raw-loading,
+.code-raw-error {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 8px 0;
+}
+.code-raw-error { color: #f08a6c; }
+
+/* ── Typing throbber ─────────────────────────────────────────────────────── */
+.code-log-typing {
+  display: flex;
+  padding: 8px 14px 4px;
+}
+.code-log-typing .typing-indicator {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
