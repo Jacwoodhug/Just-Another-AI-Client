@@ -1,6 +1,6 @@
-# Ollama Voice Chat
+# Just Another AI Client (JAAC)
 
-A local-first voice chat web UI that sends transcribed speech to an Ollama LLM (or OpenRouter), lets the model stay silent if it wants, and stores long-term RAG memory in SQLite.
+A local-first AI assistant web UI with Chat, Code, and Image workspaces. Sends transcribed speech to an Ollama LLM (or OpenRouter), generates images via ComfyUI, supports AI-assisted coding with file diffs and approval flows, and stores long-term RAG memory in SQLite.
 
 ## Requirements
 - Python 3.12 (main backend)
@@ -19,7 +19,7 @@ Creates `.venv` with Python 3.12, installs backend dependencies:
 .\run_setup_main.ps1
 ```
 
-### 2. Frontend (Node.js — required for Code Workspace)
+### 2. Frontend (Node.js — required)
 Install frontend dependencies and do an initial build:
 ```powershell
 cd frontend
@@ -35,7 +35,7 @@ Creates `.venv-kokoro` with Python 3.11, installs PyTorch + Kokoro TTS:
 .\run_setup_kokoroTTS.ps1
 ```
 
-### 3. ComfyUI Image Generation (optional)
+### 4. ComfyUI Image Generation (optional)
 If you already have ComfyUI installed elsewhere, skip this script and just set `COMFYUI_DIR` in `backend/.env` to your existing installation path:
 ```
 COMFYUI_DIR=D:/path/to/your/ComfyUI
@@ -49,13 +49,13 @@ After setup, place your checkpoint files (`.safetensors`) in `ComfyUI/models/che
 
 If you installed via the setup script, you can leave `COMFYUI_DIR=` blank in `.env` - the backend will automatically detect the `ComfyUI/` folder in the project root.
 
-### 4. Pull Ollama models
+### 5. Pull Ollama models
 ```powershell
 ollama pull llama3.1:8b
 ollama pull nomic-embed-text
 ```
 
-### 5. Configure
+### 6. Configure
 Copy `backend/.env.example` to `backend/.env` and edit as needed. See the Configuration section below.
 
 ## Basic Run Commands Post Setup
@@ -68,7 +68,7 @@ uvicorn app:app --reload
 ```
 or
 ```powershell
-.run_webui.ps1
+.\run_webui.ps1
 ```
 
 2. Frontend Watch (open a second terminal when developing React components)
@@ -86,7 +86,7 @@ uvicorn kokoro_service:app --host 127.0.0.1 --port 5005
 ```
 or
 ```powershell
-.run_kokoro.ps1
+.\run_kokoro.ps1
 ```
 
 ## Manual Setup (alternative)
@@ -105,10 +105,17 @@ You can set environment variables or create `backend/.env` for local config.
 Example `backend/.env`:
 
 ```
+# --- Ollama ---
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=llama3.1:8b
 OLLAMA_EMBED_MODEL=nomic-embed-text
+
+# --- Search ---
+SEARXNG_BASE_URL=http://localhost:8080
 SEARXNG_RESULTS=5
+BRAVE_API_KEY=
+
+# --- LLM Provider (ollama or openrouter) ---
 LLM_PROVIDER=ollama
 OPENROUTER_API_KEY=
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
@@ -116,25 +123,44 @@ OPENROUTER_MODEL=meta-llama/llama-3.1-8b-instruct:free
 OPENROUTER_APP_NAME=Ollama Voice Chat
 OPENROUTER_APP_URL=http://localhost:8000
 OPENROUTER_FREE_ONLY=true
+
+# --- ComfyUI Image Generation ---
+COMFYUI_DIR=C:/path/to/ComfyUI
+COMFYUI_MODELS_PATH=
+COMFYUI_PORT=8188
+COMFYUI_VRAM_THRESHOLD_GB=10
+
+# --- Memory / Context ---
+CHAT_MAX_HISTORY=30
+CONTEXT_MAX_TOKENS=128000
+RAG_TOP_K=20
 ```
 
 Available variables:
 - `OLLAMA_BASE_URL` (default: `http://localhost:11434`)
 - `OLLAMA_MODEL` (default: `llama3.1:8b`)
 - `OLLAMA_EMBED_MODEL` (default: `nomic-embed-text`)
+- `SEARXNG_BASE_URL` (SearxNG instance URL, default: `http://localhost:8080`)
 - `SEARXNG_RESULTS` (default: `5`)
+- `BRAVE_API_KEY` (API key for Brave Search as an alternative to SearxNG)
 - `LLM_PROVIDER` (`ollama` or `openrouter`, default: `ollama`)
 - `OPENROUTER_API_KEY` (required when `LLM_PROVIDER=openrouter`)
 - `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1`)
-- `OPENROUTER_MODEL` (default: `google/gemma-3-27b-it:free`)
+- `OPENROUTER_MODEL` (default: `meta-llama/llama-3.1-8b-instruct:free`)
 - `OPENROUTER_APP_NAME` (optional header for OpenRouter)
 - `OPENROUTER_APP_URL` (optional header for OpenRouter)
 - `OPENROUTER_FREE_ONLY` (filter model list to free models, default: `true`)
 - `KOKORO_BASE_URL` (Kokoro TTS service URL, default: `http://localhost:5005`)
+- `KOKORO_PORT` (Kokoro TTS port, default: `5005`)
 - `COMFYUI_DIR` (path to ComfyUI installation, e.g. `D:/1Software/AI VC Test/ai-vc-test/ComfyUI`)
+- `COMFYUI_BASE_URL` (ComfyUI service URL, default: `http://localhost:8188`)
 - `COMFYUI_MODELS_PATH` (optional override path to checkpoints folder; auto-detected from `COMFYUI_DIR/models/checkpoints` if blank)
 - `COMFYUI_PORT` (ComfyUI listen port, default: `8188`)
 - `COMFYUI_VRAM_THRESHOLD_GB` (free VRAM needed before skipping Ollama unload, default: `10`)
+- `CHAT_MAX_HISTORY` (max recent messages fetched from SQLite before token trimming, default: `20`)
+- `CONTEXT_MAX_TOKENS` (token budget for full context — system prompt + history, default: `4096`)
+- `RAG_TOP_K` (max RAG results injected into context, default: `4`)
+- `EMBED_MAX_CHARS` (max characters per text chunk sent to the embedding model, default: `8000`)
 
 ## Using OpenRouter
 1. Set `LLM_PROVIDER=openrouter`.
@@ -152,6 +178,7 @@ Run `.\run_setup_comfyui.ps1` to clone and install ComfyUI. Start/stop it from t
 The LLM can call the `generateImage` tool when a user asks to create an image. VRAM is managed automatically - Ollama models are unloaded if free VRAM is below the threshold.
 
 ## Behavior notes
+- The UI has three workspaces: **Chat** (voice/text conversation), **Code** (AI-assisted coding with file tree, diffs, and approval flows), and **Image** (browsing and generating images via ComfyUI).
 - The mic stays on and only sends text when speech is finalized by the browser.
 - The assistant can choose to stay silent. The UI shows a brief note when that happens.
 - RAG memory persists in `backend/memory.sqlite3` across sessions.
