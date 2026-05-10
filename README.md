@@ -71,14 +71,13 @@ or
 .\run_webui.ps1
 ```
 
-2. Frontend Watch (open a second terminal when developing React components)
+**Dev mode** (backend --reload + Vite watch in a new window, combined):
 ```powershell
-.\run_watch_frontend.bat
+.\run_webui_dev.bat
 ```
-Vite watches `frontend/src/` and rebuilds `frontend-dist/` automatically on save.
-Refresh the browser after each rebuild. Not needed when only editing Python or `app.js`.
+Vite watches `frontend/src/` and rebuilds `frontend-dist/` automatically on save. Refresh the browser after each rebuild.
 
-3. Kokoro Service
+2. Kokoro Service
 ```powershell
 cd .\backend\
 .\.venv-kokoro\Scripts\activate
