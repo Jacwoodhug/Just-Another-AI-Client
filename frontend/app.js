@@ -7,6 +7,8 @@ const modelStatus = document.getElementById("modelStatus");
 const providerBadge = document.getElementById("providerBadge");
 const voiceSelect = document.getElementById("voiceSelect");
 const voiceTestBtn = document.getElementById("voiceTestBtn");
+const audioOutputSelect = document.getElementById("audioOutputSelect");
+const audioOutputRow = document.getElementById("audioOutputRow");
 const voicePill = document.querySelector(".voice-pill");
 const ttsToggle = document.getElementById("ttsToggle");
 const ttsProviderToggle = document.getElementById("ttsProviderToggle");
@@ -161,6 +163,7 @@ let kokoroPlaying = false;
 let kokoroGeneration = 0;
 let kokoroAbortController = null; // unused, kept for compatibility
 let kokoroCurrentAudio = null;
+let audioOutputDeviceId = localStorage.getItem('ttsOutputDevice') || '';
 const SESSION_STORAGE_KEY = "chatSessions";
 const SEARCH_METHOD_KEY = "searchMethod";
 let searchMethod = localStorage.getItem(SEARCH_METHOD_KEY) || "searxng";
@@ -1838,11 +1841,16 @@ function playNextKokoro() {
       playNextKokoro();
     }
   };
-  audio.play().catch(() => {
+  const doPlay = () => audio.play().catch(() => {
     if (item.generation === kokoroGeneration) {
       playNextKokoro();
     }
   });
+  if (audioOutputDeviceId && audio.setSinkId) {
+    audio.setSinkId(audioOutputDeviceId).then(doPlay).catch(doPlay);
+  } else {
+    doPlay();
+  }
   prefetchNextKokoro();
 }
 
@@ -2539,6 +2547,44 @@ function initVoices() {
   loadTtsVoices();
 }
 
+async function populateAudioOutputDevices() {
+  if (!audioOutputSelect || !audioOutputRow) return;
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    audioOutputRow.hidden = true;
+    return;
+  }
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const outputs = devices.filter(d => d.kind === 'audiooutput');
+    audioOutputRow.hidden = outputs.length === 0;
+    if (outputs.length === 0) return;
+
+    const prevValue = audioOutputSelect.value || audioOutputDeviceId;
+    audioOutputSelect.innerHTML = '';
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Default';
+    audioOutputSelect.appendChild(defaultOpt);
+
+    outputs.forEach((device, i) => {
+      const opt = document.createElement('option');
+      opt.value = device.deviceId;
+      opt.textContent = device.label || `Speaker ${i + 1}`;
+      audioOutputSelect.appendChild(opt);
+    });
+
+    const match = [...audioOutputSelect.options].some(o => o.value === prevValue);
+    audioOutputSelect.value = match ? prevValue : '';
+  } catch (e) {
+    audioOutputRow.hidden = true;
+  }
+}
+
+async function applyAudioOutputDevice(deviceId) {
+  audioOutputDeviceId = deviceId;
+  localStorage.setItem('ttsOutputDevice', deviceId);
+}
+
 const thinkingLoopToggle = document.getElementById("thinkingLoopToggle");
 
 if (thinkingLoopToggle) {
@@ -2641,6 +2687,7 @@ function openSettings() {
   if (histInput) histInput.value = chatMaxHistory;
   if (tokInput) tokInput.value = Math.round(contextMaxTokens / 1000);
   if (ragInput) ragInput.value = ragTopK;
+  populateAudioOutputDevices();
   checkKokoroStatus();
   checkComfyUIStatus();
   loadComfyUIModels();
@@ -3553,6 +3600,12 @@ if (voiceSelect) {
 if (voiceTestBtn) {
   voiceTestBtn.addEventListener("click", () => {
     speak("test");
+  });
+}
+
+if (audioOutputSelect) {
+  audioOutputSelect.addEventListener("change", () => {
+    applyAudioOutputDevice(audioOutputSelect.value);
   });
 }
 
