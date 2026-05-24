@@ -15,6 +15,10 @@ env/
 backend/*.sqlite3
 backend/memories*.yaml
 
+# Chatterbox Repo
+chatterbox/
+chatter-voices/
+
 # User data
 ComfyUI/
 generated_images/

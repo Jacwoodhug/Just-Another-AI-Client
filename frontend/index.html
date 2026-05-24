@@ -37,6 +37,10 @@
       <span class="kokoro-status-dot" id="hdrKokoroDot"></span>
       <span class="hdr-svc-label">Kokoto TTS</span>
     </div>
+    <div class="hdr-svc-pill" id="hdrChatterboxPill" title="Chatterbox TTS service">
+      <span class="kokoro-status-dot" id="hdrChatterboxDot"></span>
+      <span class="hdr-svc-label">Chatterbox</span>
+    </div>
     <div class="hdr-svc-pill" id="hdrComfyuiPill" title="Image Generation service">
       <span class="comfyui-status-dot" id="hdrComfyuiDot"></span>
       <span class="hdr-svc-label">ComfyUI</span>
@@ -293,7 +297,11 @@
           <div class="settings-section-title">Text-to-Speech</div>
           <div class="setting-row">
             <label class="setting-label">TTS Provider</label>
-            <button class="small" id="ttsProviderToggle" type="button">TTS: Browser</button>
+            <div class="setting-toggle" id="ttsProviderToggle" role="group" aria-label="TTS provider">
+              <button class="setting-option" type="button" data-value="browser">Browser</button>
+              <button class="setting-option" type="button" data-value="kokoro">Kokoro</button>
+              <button class="setting-option" type="button" data-value="chatterbox">Chatterbox</button>
+            </div>
           </div>
           <!-- voice-pill: hidden when TTS is disabled (via setTtsEnabled) -->
           <div class="voice-pill">
@@ -301,13 +309,40 @@
               <label class="setting-label" for="voiceSelect">Voice</label>
               <select id="voiceSelect" style="flex:2;max-width:220px"></select>
             </div>
-            <div class="setting-row" id="audioOutputRow" hidden>
-              <label class="setting-label" for="audioOutputSelect">Output Device</label>
-              <select id="audioOutputSelect" style="flex:2;max-width:220px"></select>
-            </div>
             <div class="setting-row">
               <span></span>
               <button class="small" id="voiceTestBtn" type="button">Test voice</button>
+            </div>
+          </div>
+          <div class="setting-row" id="audioOutputRow" hidden>
+            <label class="setting-label" for="audioOutputSelect">Output Device</label>
+            <select id="audioOutputSelect" style="flex:2;max-width:220px"></select>
+          </div>
+          <div class="chatterbox-params-pill" id="chatterboxParamsPill" hidden>
+            <div class="setting-row">
+              <label class="setting-label" for="chatterboxVoiceSelect">Voice</label>
+              <select id="chatterboxVoiceSelect" style="flex:2;max-width:220px">
+                <option value="">Default</option>
+              </select>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="chatterboxExaggerationInput">Exaggeration</label>
+              <input type="range" id="chatterboxExaggerationInput" min="0" max="2" step="0.05" value="0.5">
+              <span id="chatterboxExaggerationVal">0.5</span>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="chatterboxCfgWeightInput">CFG Weight</label>
+              <input type="range" id="chatterboxCfgWeightInput" min="0" max="1" step="0.05" value="0.5">
+              <span id="chatterboxCfgWeightVal">0.5</span>
+            </div>
+            <div class="setting-row">
+              <label class="setting-label" for="chatterboxTemperatureInput">Temperature</label>
+              <input type="range" id="chatterboxTemperatureInput" min="0.1" max="2" step="0.05" value="0.8">
+              <span id="chatterboxTemperatureVal">0.8</span>
+            </div>
+            <div class="setting-row">
+              <span></span>
+              <button class="small" id="chatterboxVoiceTestBtn" type="button">Test voice</button>
             </div>
           </div>
         </div>
@@ -364,6 +399,38 @@
                 <span class="kokoro-status-text" id="kokoroStatusText">Checking…</span>
               </div>
               <button class="small" id="kokoroToggleBtn" type="button" disabled>Launch</button>
+            </div>
+          </div>
+
+          <!-- Chatterbox TTS -->
+          <div class="service-card" id="chatterboxServiceCard">
+            <div class="service-card-header">
+              <div class="service-card-status">
+                <span class="kokoro-status-dot" id="chatterboxStatusDot"></span>
+                <span class="service-card-name">Chatterbox TTS</span>
+                <span class="kokoro-status-text" id="chatterboxStatusText">Checking…</span>
+              </div>
+              <button class="small" id="chatterboxToggleBtn" type="button" disabled>Launch</button>
+            </div>
+            <div id="chatterboxServiceSettings" style="margin-top:10px">
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">Exaggeration</label>
+                <input type="range" id="chatterboxSvcExaggeration" min="0" max="2" step="0.05" value="0.5" style="flex:2">
+                <span id="chatterboxSvcExaggerationVal">0.5</span>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">CFG Weight</label>
+                <input type="range" id="chatterboxSvcCfgWeight" min="0" max="1" step="0.05" value="0.5" style="flex:2">
+                <span id="chatterboxSvcCfgWeightVal">0.5</span>
+              </div>
+              <div class="setting-row">
+                <label class="setting-label" style="flex:1">Temperature</label>
+                <input type="range" id="chatterboxSvcTemperature" min="0.1" max="2" step="0.05" value="0.8" style="flex:2">
+                <span id="chatterboxSvcTemperatureVal">0.8</span>
+              </div>
+              <div class="setting-row" style="justify-content:flex-end">
+                <button class="small" id="chatterboxSaveSettingsBtn" type="button">Save</button>
+              </div>
             </div>
           </div>
 
@@ -483,6 +550,7 @@
             <div class="setting-toggle" id="peTtsProviderToggle" role="group" aria-label="TTS provider">
               <button class="setting-option" type="button" data-value="browser">Browser</button>
               <button class="setting-option" type="button" data-value="kokoro">Kokoro</button>
+              <button class="setting-option" type="button" data-value="chatterbox">Chatterbox</button>
             </div>
           </div>
           <label class="personality-field-label">TTS Voice

@@ -54,6 +54,9 @@ OPENROUTER_FREE_ONLY = os.getenv("OPENROUTER_FREE_ONLY", "true").lower() in (
 KOKORO_BASE_URL = os.getenv("KOKORO_BASE_URL", "http://localhost:5005").rstrip("/")
 KOKORO_PORT = os.getenv("KOKORO_PORT", "5005")
 
+CHATTERBOX_BASE_URL = os.getenv("CHATTERBOX_BASE_URL", "http://localhost:5006").rstrip("/")
+CHATTERBOX_PORT = os.getenv("CHATTERBOX_PORT", "5006")
+
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://localhost:8188").rstrip("/")
 COMFYUI_PORT = os.getenv("COMFYUI_PORT", "8188")
 _comfyui_dir_env = os.getenv("COMFYUI_DIR", "").strip()
@@ -86,6 +89,10 @@ DEFAULT_USER_CONFIG: Dict[str, Any] = {
     "ttsProvider": "browser",
     "ttsVoice": "",
     "ttsVoiceKokoro": "",
+    "ttsVoiceChatterbox": "",
+    "chatterboxExaggeration": 0.5,
+    "chatterboxCfgWeight": 0.5,
+    "chatterboxTemperature": 0.8,
     "llmProvider": "ollama",
     "ollamaModel": "",
     "openrouterModel": "",
@@ -196,6 +203,54 @@ def _stop_kokoro() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chatterbox subprocess management
+# ---------------------------------------------------------------------------
+_chatterbox_process: Optional[subprocess.Popen] = None
+
+
+def _chatterbox_venv_python() -> Optional[str]:
+    """Return the path to the chatterbox/.venv Python executable, or None."""
+    if sys.platform == "win32":
+        candidate = BASE_DIR.parent / "chatterbox" / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = BASE_DIR.parent / "chatterbox" / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else None
+
+
+def _chatterbox_health_check() -> bool:
+    """Return True if the Chatterbox service responds to a health check."""
+    try:
+        r = requests.get(f"{CHATTERBOX_BASE_URL}/health", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _is_chatterbox_running() -> bool:
+    """Check whether the Chatterbox service is reachable."""
+    global _chatterbox_process
+    if _chatterbox_process is not None and _chatterbox_process.poll() is not None:
+        _chatterbox_process = None
+    return _chatterbox_health_check()
+
+
+def _stop_chatterbox() -> None:
+    """Terminate the managed Chatterbox subprocess if running."""
+    global _chatterbox_process
+    if _chatterbox_process is not None:
+        try:
+            _chatterbox_process.terminate()
+            try:
+                _chatterbox_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _chatterbox_process.kill()
+                _chatterbox_process.wait(timeout=3)
+        except Exception:
+            pass
+        _chatterbox_process = None
+
+
+# ---------------------------------------------------------------------------
 # ComfyUI subprocess management
 # ---------------------------------------------------------------------------
 _comfyui_process: Optional[subprocess.Popen] = None
@@ -241,6 +296,16 @@ def _stop_comfyui() -> None:
         except Exception:
             pass
         _comfyui_process = None
+
+
+# ---------------------------------------------------------------------------
+# Gemma 4 detection helper
+# ---------------------------------------------------------------------------
+
+def _is_gemma4(model: str) -> bool:
+    """Return True if model name indicates a Gemma 4 variant."""
+    name = model.lower()
+    return "gemma4" in name or "gemma-4" in name or "gemma_4" in name
 
 
 _SYSTEM_PROMPT_PRE_TONE = (
@@ -344,8 +409,108 @@ _SYSTEM_PROMPT_POST_TONE = (
 )
 
 
-def build_system_prompt(tone_context=None, social_mode=False):
+# ── Gemma 4-specific prompt pieces (uses native channel-block thinking) ─────
+
+_GEMMA4_SYSTEM_PROMPT_PRE_TONE = (
+    "You are a voice chat assistant in a web GUI. "
+    "You can choose to respond or stay silent.\n"
+    "\n"
+    "RESPONSE FORMAT:\n"
+    "Your response has two parts generated automatically by your thinking mode:\n"
+    "1. Thought block (<|channel>thought\\n...<channel|>): your private internal reasoning."
+    " This is shown in the Thinking panel and is never spoken aloud.\n"
+    "2. Final response (text after <channel|>): what you say aloud."
+    " Leave this completely empty to stay silent.\n"
+    "Do NOT output [SPOKEN] or [SILENT] markers — use your thought block for internal notes\n"
+    "and put only your spoken reply in the final response.\n"
+    "\n"
+    "TOOLS:\n"
+    "You have access to tools. Use them when appropriate:\n"
+    "- webSearch: search the web when you need current information, facts, or anything you're unsure about.\n"
+    "- generateImage: generate an image using AI. Use when the user asks to create, draw, or generate a picture. Can be called multiple times in the same message to generate more than one image. After all images are generated, always reply confirming they are ready.\n"
+    "- memoryStore: store a durable fact about the user (preferences, habits, long-term info). Not for transient moods.\n"
+    "  When the user says 'remember this', 'remember that', 'don't forget', 'keep in mind', or similar, ALWAYS use memoryStore to save the relevant fact.\n"
+    "  Also use memoryStore proactively when the user reveals a preference, habit, or important personal detail worth retaining.\n"
+    "- memoryEdit: update an existing memory entry by id.\n"
+    "- memoryDelete: remove a memory entry by id.\n"
+    "If web search results are provided via tool response, use them to answer. Do not cite URLs unless explicitly asked.\n"
+    "\n"
+    "BEHAVIORAL GUIDELINES:\n"
+    "You are an ambient, voice-first companion with access to memory. Your primary interaction channel is spoken conversation.\n"
+    "\n"
+    "Core interaction rule (very important):\n"
+    "- When the user speaks, you should almost always respond.\n"
+    "- Silence after user speech should be rare and intentional (e.g., explicit request for quiet, rhetorical statements).\n"
+    "\n"
+    "Voice interactions:\n"
+    "When the user speaks:\n"
+    "- Assume they want engagement, acknowledgement, or response.\n"
+    "- Respond in most cases.\n"
+    "- It is acceptable to respond even if the user did not ask a direct question.\n"
+    "- You may answer, reflect, react socially, ask a follow-up, or comment briefly.\n"
+    "- If speech is ambiguous, respond lightly rather than staying silent. Acknowledge or mirror rather than analyze.\n"
+    "\n"
+    "Asking questions:\n"
+    "- You are allowed and encouraged to ask questions, especially following user speech.\n"
+    "- Ask one question at a time. Keep it low-pressure and conversational.\n"
+    "- Curiosity, not interrogation. Easy to ignore.\n"
+    "\n"
+)
+
+_GEMMA4_SYSTEM_PROMPT_SOCIAL_BLOCK = (
+    "SOCIAL MODE (active):\n"
+    "You also have access to:\n"
+    "- requestScreenshot: request a screenshot when you need to see what's on the user's screen.\n"
+    "\n"
+    "You have visual awareness of the user's screen. Screenshots provide passive context, not obligations to respond.\n"
+    "\n"
+    "Additional core interaction rules:\n"
+    "- When no user speech is present, you may choose whether or not to respond to screenshots.\n"
+    "- Voice implies engagement. Screenshots imply awareness only.\n"
+    "\n"
+    "Screenshots:\n"
+    "- Screenshots arrive automatically and frequently. Most are normal activity (YouTube, browsing, idle).\n"
+    "- Screenshots do not require a response.\n"
+    "- Use them to: provide background context, notice interests, inform tone/timing, occasionally spark curiosity.\n"
+    "- Do not feel obligated to speak just because a screenshot arrived.\n"
+    "\n"
+    "Deciding whether to respond to screenshots:\n"
+    "Output a final response only when at least one feels true:\n"
+    "- User appears idle or passively consuming content for a while.\n"
+    "- Something novel/interesting appears compared to recent context.\n"
+    "- A natural, human comment comes to mind (not forced).\n"
+    "- A gentle question would feel welcome and easy to ignore.\n"
+    "- You haven't spoken recently and a brief interaction would feel companionable.\n"
+    "- Otherwise, leave the final response empty.\n"
+    "\n"
+)
+
+_GEMMA4_SYSTEM_PROMPT_POST_TONE = (
+    "\n"
+    "\n"
+    "Silence rules:\n"
+    "Leave your final response empty primarily when:\n"
+    "- no user speech occurred\n"
+    "- you already spoke recently and nothing meaningfully changed\n"
+    "- the user appears focused or actively typing\n"
+    "- you would be guessing details you can't see clearly\n"
+    "- Silence should feel intentional and comfortable, not hesitant.\n"
+    "\n"
+    "Internal thoughts (thought block):\n"
+    "- Private observations, tentative interpretations, contextual notes.\n"
+    "- Do not leak reasoning into your final spoken response.\n"
+    "\n"
+    "Self-regulation:\n"
+    "- If you spoke very recently, raise the bar before speaking again unless the user speaks.\n"
+    "- User speech always lowers the bar to respond."
+)
+
+
+def build_system_prompt(tone_context=None, social_mode=False, model=""):
     tone = (tone_context or "").strip() or DEFAULT_TONE_CONTEXT
+    if _is_gemma4(model):
+        social_block = _GEMMA4_SYSTEM_PROMPT_SOCIAL_BLOCK if social_mode else ""
+        return _GEMMA4_SYSTEM_PROMPT_PRE_TONE + social_block + tone + _GEMMA4_SYSTEM_PROMPT_POST_TONE
     social_block = _SYSTEM_PROMPT_SOCIAL_BLOCK if social_mode else ""
     return _SYSTEM_PROMPT_PRE_TONE + social_block + tone + _SYSTEM_PROMPT_POST_TONE
 
@@ -1837,9 +2002,13 @@ def _ollama_chat_with_tools(
     """Ollama chat with tool support — returns the full response dict."""
     url = f"{OLLAMA_BASE_URL}/api/chat"
     effective_tools = tools if (tools and _ollama_model_supports_tools(model)) else []
-    payload: Dict[str, Any] = {"model": model, "messages": _merge_system_messages(messages), "stream": False}
+    merged = _merge_system_messages(messages)
+    payload: Dict[str, Any] = {"model": model, "messages": merged, "stream": False}
     if effective_tools:
         payload["tools"] = effective_tools
+    if _is_gemma4(model):
+        payload["options"] = _GEMMA4_SAMPLING_OPTIONS
+        payload["think"] = True
     response = requests.post(url, json=payload, timeout=120)
     response.raise_for_status()
     return response.json()
@@ -2216,6 +2385,7 @@ def _ollama_stop_model(name: str) -> None:
 @app.on_event("shutdown")
 def shutdown_cleanup() -> None:
     _stop_kokoro()
+    _stop_chatterbox()
     _stop_comfyui()
     for model_name in _ollama_running_models():
         _ollama_stop_model(model_name)
@@ -2240,24 +2410,43 @@ def _ollama_chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[
                 yield content
 
 
+_GEMMA4_CHANNEL_OPEN = "<|channel>thought"
+_GEMMA4_CHANNEL_CLOSE = "<channel|>"
+
+
 class _SectionStreamState:
-    """Route streaming tokens into spoken/silent channels based on [SPOKEN]/[SILENT] markers."""
+    """Route streaming tokens into spoken/silent channels.
+
+    For Gemma 4 models: uses native channel-block markers
+    (<|channel>thought\\n ... <channel|>) — thought block → silent, remainder → spoken.
+    For other models: uses [SPOKEN]/[SILENT] section markers.
+    """
 
     _MARKERS = {"[SPOKEN]": "spoken", "[SILENT]": "silent"}
+    # Gemma 4 channel markers mapped to channels
+    _GEMMA4_MARKERS = {
+        _GEMMA4_CHANNEL_OPEN: "silent",  # <|channel>thought → silent (thought block)
+        _GEMMA4_CHANNEL_CLOSE: "spoken",  # <channel|> → spoken (final answer)
+    }
 
-    def __init__(self) -> None:
+    def __init__(self, model: str = "") -> None:
+        self._gemma4 = _is_gemma4(model)
+        # Start with no channel; tokens default to spoken until a marker is seen.
+        # For Gemma4 the thought block opens with <|channel>thought which switches to silent.
         self._channel: Optional[str] = None
         self._buf: str = ""
+        self._skip_next_newline: bool = False  # skip the \n after <|channel>thought
 
     def feed(self, token: str) -> Tuple[str, str]:
         """Feed a token; returns (spoken_out, silent_out) ready to emit."""
         self._buf += token
         spoken: List[str] = []
         silent: List[str] = []
+        markers = self._GEMMA4_MARKERS if self._gemma4 else self._MARKERS
 
         while self._buf:
             best: Optional[Tuple[int, str, str]] = None
-            for marker, ch in self._MARKERS.items():
+            for marker, ch in markers.items():
                 pos = self._buf.find(marker)
                 if pos >= 0 and (best is None or pos < best[0]):
                     best = (pos, marker, ch)
@@ -2270,13 +2459,14 @@ class _SectionStreamState:
                     (spoken if out_ch == "spoken" else silent).append(pre)
                 self._channel = new_ch
                 self._buf = self._buf[pos + len(marker):]
-                if self._buf.startswith("\n"):
+                # Skip the newline immediately after <|channel>thought
+                if self._gemma4 and marker == _GEMMA4_CHANNEL_OPEN and self._buf.startswith("\n"):
                     self._buf = self._buf[1:]
                 continue
 
             # No complete marker — hold back any partial marker suffix.
             hold = 0
-            for marker in self._MARKERS:
+            for marker in markers:
                 for length in range(1, len(marker)):
                     if self._buf.endswith(marker[:length]):
                         hold = max(hold, length)
@@ -2299,15 +2489,26 @@ class _SectionStreamState:
         return (remaining, "") if ch == "spoken" else ("", remaining)
 
 
+_GEMMA4_SAMPLING_OPTIONS: Dict[str, Any] = {
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "top_k": 64,
+}
+
+
 def _ollama_stream_first_call(
     messages: List[Dict[str, Any]], model: str, tools: List[Dict[str, Any]]
 ) -> Iterable[Tuple[str, Any]]:
     """Stream Ollama first call. Yields ("token", text) per chunk then ("final", data_dict)."""
     url = f"{OLLAMA_BASE_URL}/api/chat"
     effective_tools = tools if (tools and _ollama_model_supports_tools(model)) else []
-    payload: Dict[str, Any] = {"model": model, "messages": _merge_system_messages(messages), "stream": True}
+    merged = _merge_system_messages(messages)
+    payload: Dict[str, Any] = {"model": model, "messages": merged, "stream": True}
     if effective_tools:
         payload["tools"] = effective_tools
+    if _is_gemma4(model):
+        payload["options"] = _GEMMA4_SAMPLING_OPTIONS
+        payload["think"] = True
     with requests.post(url, json=payload, stream=True, timeout=120) as response:
         response.raise_for_status()
         for line in response.iter_lines(decode_unicode=True):
@@ -2402,11 +2603,34 @@ def _llm_stream_first_call(
 
 
 
-def _parse_sections(body: str) -> Tuple[str, str]:
-    """Parse [SPOKEN] and [SILENT] sections from the model response."""
+def _parse_sections(body: str, model: str = "") -> Tuple[str, str]:
+    """Parse spoken/silent sections from the model response.
+
+    For Gemma 4: extracts the channel thought block as silent and the
+    remaining text after <channel|> as spoken.
+    For other models: parses [SPOKEN]/[SILENT] section markers.
+    """
     if not body:
         return "", ""
 
+    if _is_gemma4(model):
+        # Strip leading/trailing whitespace once
+        text = body.strip()
+        open_pos = text.find(_GEMMA4_CHANNEL_OPEN)
+        close_pos = text.find(_GEMMA4_CHANNEL_CLOSE)
+        if open_pos != -1 and close_pos != -1 and close_pos > open_pos:
+            # Extract thought block content (between open tag and close tag)
+            thought_start = open_pos + len(_GEMMA4_CHANNEL_OPEN)
+            # Skip a leading newline after the opening tag if present
+            if thought_start < len(text) and text[thought_start] == "\n":
+                thought_start += 1
+            silent_text = text[thought_start:close_pos].strip()
+            spoken_text = text[close_pos + len(_GEMMA4_CHANNEL_CLOSE):].strip()
+            return spoken_text, silent_text
+        # No channel block found — treat entire body as spoken (thinking disabled or stripped)
+        return text, ""
+
+    # ── Standard [SPOKEN]/[SILENT] parsing ─────────────────────────────────
     spoken_lines: List[str] = []
     silent_lines: List[str] = []
     section: Optional[str] = None
@@ -2521,7 +2745,7 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
 
     memory_context = active_yaml_store.format_for_context()
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(social_mode=bool(request.social_mode))},
+        {"role": "system", "content": build_system_prompt(social_mode=bool(request.social_mode), model=selected_model)},
         {"role": "system", "content": _build_code_system_prompt(workspace_dirs, pre_approved)},
         {"role": "system", "content": _current_time_context()},
     ]
@@ -2558,7 +2782,7 @@ def _chat_code_workspace(request: ChatRequest, session_id: str) -> ChatResponse:
 
     # Store message history (bare user prompt + short spoken text only)
     active_store.add_message(code_session_id, "user", user_text, None)
-    spoken, silent_text = _parse_sections(final_text)
+    spoken, silent_text = _parse_sections(final_text, selected_model)
     spoken_text = spoken or final_text
     _CODE_CODE_FENCE_RE = re.compile(r"```")
     _CODE_INDENT_RE = re.compile(r"^[ \t]{2,}", re.MULTILINE)
@@ -2664,7 +2888,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=502, detail=f"Embedding error: {exc}")
 
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(tone_context, social_mode=bool(request.social_mode))},
+        {"role": "system", "content": build_system_prompt(tone_context, social_mode=bool(request.social_mode), model=selected_model)},
         {"role": "system", "content": _current_time_context()},
     ]
     time_since = _time_since_last_message_context(recent)
@@ -2742,7 +2966,7 @@ def chat(request: ChatRequest) -> ChatResponse:
             context_debug=context_debug,
         )
 
-    spoken_text, silent_text = _parse_sections(raw_content)
+    spoken_text, silent_text = _parse_sections(raw_content, selected_model)
 
     if not hidden and not regenerate and user_text != "[Thinking Tick]":
         active_store.add_message(
@@ -2804,7 +3028,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
     recent = active_store.get_recent(session_id, limit=eff_max_history)
 
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(tone_context, social_mode=bool(request.social_mode))},
+        {"role": "system", "content": build_system_prompt(tone_context, social_mode=bool(request.social_mode), model=selected_model)},
         {"role": "system", "content": _current_time_context()},
     ]
     time_since = _time_since_last_message_context(recent)
@@ -2874,7 +3098,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
 
         try:
             # ── First call: streaming so tokens appear progressively ──
-            section_state = _SectionStreamState()
+            section_state = _SectionStreamState(model=selected_model)
             first_data: Optional[Dict[str, Any]] = None
             raw_content_accumulated = ""
 
@@ -2929,7 +3153,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                     # Genuinely no tool calls — yield whatever text the model produced.
                     raw_content = _get_content_from_response(data, provider)
                     raw_content_accumulated = raw_content
-                    spoken_text, silent_text = _parse_sections(raw_content)
+                    spoken_text, silent_text = _parse_sections(raw_content, selected_model)
                     if spoken_text:
                         yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
                     if silent_text:
@@ -2944,7 +3168,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
                         # Final response from a post-tool non-streaming call.
                         raw_content = _get_content_from_response(data, provider)
                         raw_content_accumulated = raw_content
-                        spoken_text, silent_text = _parse_sections(raw_content)
+                        spoken_text, silent_text = _parse_sections(raw_content, selected_model)
                         if spoken_text:
                             yield json.dumps({"type": "token", "channel": "spoken", "text": spoken_text}) + "\n"
                         if silent_text:
@@ -3371,6 +3595,150 @@ def kokoro_start() -> Dict[str, str]:
 def kokoro_stop() -> Dict[str, str]:
     _stop_kokoro()
     return {"status": "stopped"}
+
+
+# ---------------------------------------------------------------------------
+# Chatterbox subprocess lifecycle endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/chatterbox/status")
+def chatterbox_status() -> Dict[str, Any]:
+    running = _is_chatterbox_running()
+    available = _chatterbox_venv_python() is not None
+    return {"running": running, "available": available, "managed": True}
+
+
+@app.post("/api/chatterbox/start")
+def chatterbox_start() -> Dict[str, str]:
+    global _chatterbox_process
+    if _is_chatterbox_running():
+        return {"status": "already_running"}
+    python = _chatterbox_venv_python()
+    if not python:
+        raise HTTPException(status_code=503, detail="Chatterbox venv not found")
+    service_script = BASE_DIR / "chatterbox_service.py"
+    cmd = [
+        python,
+        "-m",
+        "uvicorn",
+        "chatterbox_service:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        CHATTERBOX_PORT,
+    ]
+    _chatterbox_process = subprocess.Popen(
+        cmd,
+        cwd=str(BASE_DIR),
+        creationflags=_DETACH_FLAGS,
+    )
+    for _ in range(60):
+        if _chatterbox_health_check():
+            return {"status": "started"}
+        time.sleep(0.5)
+    _stop_chatterbox()
+    raise HTTPException(
+        status_code=500, detail="Chatterbox did not become ready within 30 seconds"
+    )
+
+
+@app.post("/api/chatterbox/stop")
+def chatterbox_stop() -> Dict[str, str]:
+    _stop_chatterbox()
+    return {"status": "stopped"}
+
+
+_CHATTER_VOICES_DIR = os.path.join(os.path.dirname(__file__), "..", "chatter-voices")
+_CHATTER_AUDIO_EXTS = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
+
+
+@app.get("/api/chatterbox/voices")
+def chatterbox_voices() -> Dict[str, Any]:
+    voices: list[str] = []
+    if os.path.isdir(_CHATTER_VOICES_DIR):
+        for f in sorted(os.listdir(_CHATTER_VOICES_DIR)):
+            ext = os.path.splitext(f)[1].lower()
+            if ext in _CHATTER_AUDIO_EXTS:
+                voices.append(os.path.splitext(f)[0])
+    return {"voices": voices}
+
+
+@app.get("/api/chatterbox/tts")
+def chatterbox_tts_proxy(
+    text: str,
+    exaggeration: Optional[float] = None,
+    cfg_weight: Optional[float] = None,
+    temperature: Optional[float] = None,
+) -> StreamingResponse:
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    payload: Dict[str, Any] = {"text": text}
+    if exaggeration is not None:
+        payload["exaggeration"] = exaggeration
+    if cfg_weight is not None:
+        payload["cfg_weight"] = cfg_weight
+    if temperature is not None:
+        payload["temperature"] = temperature
+    url = f"{CHATTERBOX_BASE_URL}/tts"
+    try:
+        response = requests.post(url, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Chatterbox TTS error: {exc}")
+    media_type = response.headers.get("Content-Type", "audio/wav").split(";")[0]
+
+    def stream_audio() -> Iterable[bytes]:
+        try:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+        finally:
+            response.close()
+
+    return StreamingResponse(stream_audio(), media_type=media_type)
+
+
+@app.get("/api/chatterbox/tts/stream")
+def chatterbox_tts_stream_proxy(
+    text: str,
+    exaggeration: Optional[float] = None,
+    cfg_weight: Optional[float] = None,
+    temperature: Optional[float] = None,
+    voice: Optional[str] = None,
+) -> StreamingResponse:
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+    payload: Dict[str, Any] = {"text": text}
+    if exaggeration is not None:
+        payload["exaggeration"] = exaggeration
+    if cfg_weight is not None:
+        payload["cfg_weight"] = cfg_weight
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if voice:
+        payload["audio_prompt_path"] = voice
+    url = f"{CHATTERBOX_BASE_URL}/tts/stream"
+    try:
+        response = requests.post(url, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Chatterbox TTS stream error: {exc}")
+
+    def stream_audio() -> Iterable[bytes]:
+        try:
+            for chunk in response.iter_content(chunk_size=None):
+                if chunk:
+                    yield chunk
+        finally:
+            response.close()
+
+    return StreamingResponse(
+        stream_audio(),
+        media_type="audio/wav",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4585,7 +4953,7 @@ def code_approve(request: CodeApproveRequest) -> ChatResponse:
 
     context_debug = _build_context_debug(messages)
 
-    spoken_resume, silent_resume = _parse_sections(final_text)
+    spoken_resume, silent_resume = _parse_sections(final_text, model)
 
     if next_approval:
         return ChatResponse(

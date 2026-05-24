@@ -70,6 +70,11 @@ const kokoroToggleBtn = document.getElementById("kokoroToggleBtn");
 const kokoroStatusDot = document.getElementById("kokoroStatusDot");
 const kokoroStatusText = document.getElementById("kokoroStatusText");
 const hdrKokoroDot = document.getElementById("hdrKokoroDot");
+const chatterboxToggleBtn = document.getElementById("chatterboxToggleBtn");
+const chatterboxStatusDot = document.getElementById("chatterboxStatusDot");
+const chatterboxStatusText = document.getElementById("chatterboxStatusText");
+const hdrChatterboxDot = document.getElementById("hdrChatterboxDot");
+const chatterboxParamsPill = document.getElementById("chatterboxParamsPill");
 const comfyuiToggleBtn = document.getElementById("comfyuiToggleBtn");
 const comfyuiStatusDot = document.getElementById("comfyuiStatusDot");
 const comfyuiStatusText = document.getElementById("comfyuiStatusText");
@@ -152,12 +157,27 @@ let ttsProvider = "browser";
 const TTS_PROVIDER_LABELS = {
   browser: "Browser",
   kokoro: "Kokoro",
+  chatterbox: "Chatterbox",
 };
 const TTS_PROVIDER_STORAGE_KEY = "ttsProvider";
 const TTS_VOICE_BROWSER_KEY = "ttsVoice";
 const TTS_VOICE_KOKORO_KEY = "ttsVoiceKokoro";
+const TTS_VOICE_CHATTERBOX_KEY = "ttsVoiceChatterbox";
+const CHATTERBOX_EXAGGERATION_KEY = "chatterboxExaggeration";
+const CHATTERBOX_CFG_WEIGHT_KEY = "chatterboxCfgWeight";
+const CHATTERBOX_TEMPERATURE_KEY = "chatterboxTemperature";
+let chatterboxExaggeration = 0.5;
+let chatterboxCfgWeight = 0.5;
+let chatterboxTemperature = 0.8;
+let chatterboxVoice = localStorage.getItem(TTS_VOICE_CHATTERBOX_KEY) || "";
+let chatterboxQueue = [];
+let chatterboxPlaying = false;
+let chatterboxGeneration = 0;
+let chatterboxCurrentAudio = null;
+let chatterboxAudioCtx = null;
 let kokoroVoices = [];
 let kokoroVoicesLoaded = false;
+let chatterboxVoices = [];
 let kokoroQueue = [];
 let kokoroPlaying = false;
 let kokoroGeneration = 0;
@@ -380,7 +400,7 @@ function providerLabel(provider) {
 
 function normalizeTtsProvider(value) {
   const candidate = (value || "").trim().toLowerCase();
-  if (candidate === "kokoro" || candidate === "browser") {
+  if (candidate === "kokoro" || candidate === "browser" || candidate === "chatterbox") {
     return candidate;
   }
   return "browser";
@@ -889,7 +909,7 @@ function saveChatMessage(role, text, imageDataUrl, personalityName) {
   try {
     localStorage.setItem(key, JSON.stringify(history));
   } catch (_) {
-    // Storage quota exceeded â€” retry without image data so at least the text survives
+    // Storage quota exceeded â€" retry without image data so at least the text survives
     if (imageDataUrl) {
       const fallback = history.map(e => e === entry ? { role: e.role, text: e.text } : e);
       try { localStorage.setItem(key, JSON.stringify(fallback)); } catch (_2) {}
@@ -1738,6 +1758,10 @@ function speak(text, interrupt = true) {
     speakWithKokoro(text, interrupt);
     return;
   }
+  if (ttsProvider === "chatterbox") {
+    speakWithChatterbox(text, interrupt);
+    return;
+  }
   if (!window.speechSynthesis) {
     return;
   }
@@ -1754,6 +1778,10 @@ function queueSpeech(text) {
 function stopTtsPlayback() {
   if (ttsProvider === "kokoro") {
     stopKokoroPlayback();
+    return;
+  }
+  if (ttsProvider === "chatterbox") {
+    stopChatterboxPlayback();
     return;
   }
   if (window.speechSynthesis) {
@@ -1786,6 +1814,177 @@ function buildTtsUrl(text) {
   const params = new URLSearchParams({ text: sanitizeTtsText(text) });
   if (voice) params.set("voice", voice);
   return `/api/tts?${params}`;
+}
+
+function buildChatterboxTtsUrl(text) {
+  const params = new URLSearchParams({ text: sanitizeTtsText(text) });
+  params.set("exaggeration", chatterboxExaggeration);
+  params.set("cfg_weight", chatterboxCfgWeight);
+  params.set("temperature", chatterboxTemperature);
+  return `/api/chatterbox/tts?${params}`;
+}
+
+function buildChatterboxStreamUrl(text) {
+  const params = new URLSearchParams({ text: sanitizeTtsText(text) });
+  params.set("exaggeration", chatterboxExaggeration);
+  params.set("cfg_weight", chatterboxCfgWeight);
+  params.set("temperature", chatterboxTemperature);
+  if (chatterboxVoice) params.set("voice", chatterboxVoice);
+  return `/api/chatterbox/tts/stream?${params}`;
+}
+
+function _getChatterboxAudioCtx() {
+  if (!chatterboxAudioCtx || chatterboxAudioCtx.state === "closed") {
+    chatterboxAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioOutputDeviceId && chatterboxAudioCtx.setSinkId) {
+      chatterboxAudioCtx.setSinkId(audioOutputDeviceId).catch(() => {});
+    }
+  }
+  if (chatterboxAudioCtx.state === "suspended") {
+    chatterboxAudioCtx.resume().catch(() => {});
+  }
+  return chatterboxAudioCtx;
+}
+
+function stopChatterboxPlayback() {
+  chatterboxGeneration += 1;
+  chatterboxPlaying = false;
+  chatterboxQueue = [];
+  if (chatterboxAudioCtx) {
+    chatterboxAudioCtx.close().catch(() => {});
+    chatterboxAudioCtx = null;
+  }
+  if (chatterboxCurrentAudio) {
+    chatterboxCurrentAudio.pause();
+    chatterboxCurrentAudio.src = "";
+    chatterboxCurrentAudio = null;
+  }
+}
+
+// Fire the fetch early so the request queues at the backend while the current
+// sentence is still playing. The lock in the service serialises GPU access.
+function _prefetchChatterboxStream(item) {
+  if (item.fetchPromise) return;
+  item.fetchPromise = fetch(buildChatterboxStreamUrl(item.text));
+}
+
+// Stream PCM chunks from the backend and schedule them on the AudioContext
+// so playback starts on the very first chunk (~0.5 s instead of 3-5 s).
+async function _playChatterboxStream(item, gen) {
+  const audioCtx = _getChatterboxAudioCtx();
+  const response = await (item.fetchPromise || fetch(buildChatterboxStreamUrl(item.text)));
+  if (!response.ok) throw new Error("TTS stream " + response.status);
+  if (gen !== chatterboxGeneration) { response.body.cancel(); return audioCtx.currentTime; }
+
+  const reader = response.body.getReader();
+  const HEADER_BYTES = 44;
+  let raw = new Uint8Array(0);
+  let headerDone = false;
+  let sampleRate = 24000;
+  let scheduledUntil = audioCtx.currentTime + 0.1;
+  const MIN_SAMPLES = 2048; // ~85 ms at 24 kHz — small enough for low latency
+
+  try {
+    while (true) {
+      if (gen !== chatterboxGeneration) { reader.cancel(); break; }
+      const { done, value } = await reader.read();
+      if (value && value.length > 0) {
+        const merged = new Uint8Array(raw.length + value.length);
+        merged.set(raw);
+        merged.set(value, raw.length);
+        raw = merged;
+      }
+      // Parse the 44-byte WAV header once to get the sample rate.
+      if (!headerDone && raw.length >= HEADER_BYTES) {
+        const dv = new DataView(raw.buffer, raw.byteOffset, HEADER_BYTES);
+        sampleRate = dv.getUint32(24, true);
+        raw = raw.slice(HEADER_BYTES);
+        headerDone = true;
+      }
+      if (headerDone) {
+        const int16Count = Math.floor(raw.length / 2);
+        if (int16Count >= MIN_SAMPLES || (done && int16Count > 0)) {
+          const usedBytes = int16Count * 2;
+          const int16 = new Int16Array(raw.buffer, raw.byteOffset, int16Count);
+          const f32 = new Float32Array(int16Count);
+          for (let i = 0; i < int16Count; i++) f32[i] = int16[i] / 32768;
+          raw = raw.slice(usedBytes);
+          const ab = audioCtx.createBuffer(1, int16Count, sampleRate);
+          ab.copyToChannel(f32, 0);
+          const src = audioCtx.createBufferSource();
+          src.buffer = ab;
+          src.connect(audioCtx.destination);
+          const t = Math.max(audioCtx.currentTime + 0.02, scheduledUntil);
+          src.start(t);
+          scheduledUntil = t + ab.duration;
+        }
+      }
+      if (done) break;
+    }
+  } catch (_) {
+    // ignore read errors on cancelled streams
+  }
+  return scheduledUntil;
+}
+
+function playNextChatterbox() {
+  if (chatterboxQueue.length === 0) { chatterboxPlaying = false; return; }
+  chatterboxPlaying = true;
+  const item = chatterboxQueue.shift();
+  if (!item || item.generation !== chatterboxGeneration) { playNextChatterbox(); return; }
+
+  // Fire the next sentence's fetch now so it queues at the backend.
+  const nextItem = chatterboxQueue[0];
+  if (nextItem) _prefetchChatterboxStream(nextItem);
+
+  _playChatterboxStream(item, item.generation)
+    .then((scheduledUntil) => {
+      if (item.generation !== chatterboxGeneration) return;
+      const ctx = chatterboxAudioCtx;
+      if (!ctx) return;
+      const remainingMs = Math.max(0, (scheduledUntil - ctx.currentTime) * 1000);
+      setTimeout(() => {
+        if (item.generation === chatterboxGeneration) playNextChatterbox();
+      }, remainingMs);
+    })
+    .catch(() => {
+      if (item.generation === chatterboxGeneration) playNextChatterbox();
+    });
+}
+
+function splitSentencesForChatterbox(text) {
+  const chunks = [];
+  let working = text;
+  while (working.length > 0) {
+    const m = working.match(/^[\s\S]*?[.!?]/);
+    if (m && m[0].trim().length >= 15) {
+      chunks.push(m[0].trim());
+      working = working.slice(m[0].length).trimStart();
+    } else {
+      chunks.push(working.trim());
+      break;
+    }
+  }
+  return chunks.filter(Boolean);
+}
+
+function speakWithChatterbox(text, interrupt) {
+  const sanitized = sanitizeTtsText(text);
+  if (!sanitized) {
+    return;
+  }
+  if (interrupt) {
+    stopChatterboxPlayback();
+  }
+  const gen = chatterboxGeneration;
+  splitSentencesForChatterbox(sanitized).forEach((s) => {
+    chatterboxQueue.push({ text: s, generation: gen, audioPromise: null });
+  });
+  if (!chatterboxPlaying) {
+    playNextChatterbox();
+  } else if (chatterboxQueue.length > 0) {
+    _prefetchChatterboxStream(chatterboxQueue[chatterboxQueue.length - 1]);
+  }
 }
 
 function speakWithKokoro(text, interrupt) {
@@ -1864,7 +2063,7 @@ function flushSpeechBuffer(force) {
 
   while (working.length > 0) {
     const sentenceMatch = working.match(/^[\s\S]*?[.!?]/);
-    if (sentenceMatch && sentenceMatch[0].length >= 20) {
+    if (sentenceMatch && sentenceMatch[0].length >= 15) {
       chunks.push(sentenceMatch[0].trim());
       working = working.slice(sentenceMatch[0].length).trimStart();
       continue;
@@ -1872,12 +2071,12 @@ function flushSpeechBuffer(force) {
 
     if (working.length > 200) {
       // Only cut at a comma or semicolon to preserve sentence flow
-      const commaMatch = working.match(/^[\s\S]*?[,;â€”]/);
+      const commaMatch = working.match(/^[\s\S]*?[,;\u2014]/);
       if (commaMatch && commaMatch[0].length <= 200) {
         chunks.push(commaMatch[0].trim());
         working = working.slice(commaMatch[0].length).trimStart();
       } else {
-        // No comma found within 200 chars â€” hold until a sentence boundary arrives,
+        // No comma found within 200 chars â€" hold until a sentence boundary arrives,
         // unless we're forcing (end of stream), in which case flush the whole thing.
         if (force) {
           chunks.push(working.trim());
@@ -2297,7 +2496,7 @@ async function sendText(text, options = {}) {
     }
   } catch (error) {
     if (error.name === "AbortError") {
-      // User cancelled â€” already cleaned up in cancelActiveRequest
+      // User cancelled â€" already cleaned up in cancelActiveRequest
       interimText.textContent = "";
     } else {
       await sendTextNonStream(payload, shouldClearAttachment, trimmed);
@@ -2522,14 +2721,18 @@ function setTtsProvider(provider) {
   saveConfigKey('ttsProvider', ttsProvider);
   stopTtsPlayback();
   if (ttsProviderToggle) {
-    ttsProviderToggle.textContent = `TTS: ${ttsProviderLabel(ttsProvider)}`;
-    ttsProviderToggle.dataset.provider = ttsProvider;
-    ttsProviderToggle.setAttribute(
-      "aria-pressed",
-      String(ttsProvider === "kokoro")
-    );
+    ttsProviderToggle.querySelectorAll(".setting-option").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.value === ttsProvider);
+    });
+  }
+  const voicePill = document.querySelector(".voice-pill");
+  if (voicePill) voicePill.hidden = ttsProvider === "chatterbox";
+  if (chatterboxParamsPill) chatterboxParamsPill.hidden = ttsProvider !== "chatterbox";
+  if (audioOutputRow && audioOutputSelect) {
+    audioOutputRow.hidden = ttsProvider === "browser" || audioOutputSelect.options.length === 0;
   }
   loadTtsVoices();
+  if (ttsProvider === "chatterbox") loadChatterboxVoices();
   updateTtsControls();
 }
 
@@ -2556,7 +2759,7 @@ async function populateAudioOutputDevices() {
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const outputs = devices.filter(d => d.kind === 'audiooutput');
-    audioOutputRow.hidden = outputs.length === 0;
+    audioOutputRow.hidden = outputs.length === 0 || ttsProvider === "browser";
     if (outputs.length === 0) return;
 
     const prevValue = audioOutputSelect.value || audioOutputDeviceId;
@@ -2580,9 +2783,38 @@ async function populateAudioOutputDevices() {
   }
 }
 
+async function loadChatterboxVoices() {
+  const sel = document.getElementById("chatterboxVoiceSelect");
+  if (!sel) return;
+  try {
+    const res = await fetch('/api/chatterbox/voices');
+    if (!res.ok) return;
+    const { voices } = await res.json();
+    sel.innerHTML = '<option value="">Default</option>';
+    voices.forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    });
+    chatterboxVoices = voices;
+    if (voices.includes(chatterboxVoice)) {
+      sel.value = chatterboxVoice;
+    } else {
+      sel.value = "";
+      chatterboxVoice = "";
+    }
+    if (peTtsProvider === "chatterbox") populatePeVoiceSelect();
+  } catch (e) {}
+}
+
 async function applyAudioOutputDevice(deviceId) {
   audioOutputDeviceId = deviceId;
   localStorage.setItem('ttsOutputDevice', deviceId);
+  if (chatterboxAudioCtx) {
+    chatterboxAudioCtx.close().catch(() => {});
+    chatterboxAudioCtx = null;
+  }
 }
 
 const thinkingLoopToggle = document.getElementById("thinkingLoopToggle");
@@ -2689,6 +2921,7 @@ function openSettings() {
   if (ragInput) ragInput.value = ragTopK;
   populateAudioOutputDevices();
   checkKokoroStatus();
+  checkChatterboxStatus();
   checkComfyUIStatus();
   loadComfyUIModels();
 }
@@ -2697,7 +2930,7 @@ function closeSettings() {
   if (settingsBackdrop) settingsBackdrop.hidden = true;
 }
 
-// â”€â”€ Service toast notifications â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Service toast notifications â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 let kokoroJustStarted = false;
 let comfyuiJustStarted = false;
@@ -2706,10 +2939,12 @@ function updateServiceToasts() {
   if (!serviceToasts) return;
   serviceToasts.innerHTML = "";
   const toasts = [
-    kokoroServiceBusy   ? { label: "Kokoro TTS",  state: kokoroServiceRunning   ? "stopping" : "starting" } : null,
-    comfyuiServiceBusy  ? { label: "ComfyUI",     state: comfyuiServiceRunning  ? "stopping" : "starting" } : null,
-    (!kokoroServiceBusy  && kokoroJustStarted)  ? { label: "Kokoro TTS",  state: "started" } : null,
-    (!comfyuiServiceBusy && comfyuiJustStarted) ? { label: "ComfyUI",     state: "started" } : null,
+    kokoroServiceBusy        ? { label: "Kokoro TTS",     state: kokoroServiceRunning      ? "stopping" : "starting" } : null,
+    chatterboxServiceBusy    ? { label: "Chatterbox TTS", state: chatterboxServiceRunning  ? "stopping" : "starting" } : null,
+    comfyuiServiceBusy       ? { label: "ComfyUI",        state: comfyuiServiceRunning     ? "stopping" : "starting" } : null,
+    (!kokoroServiceBusy     && kokoroJustStarted)     ? { label: "Kokoro TTS",     state: "started" } : null,
+    (!chatterboxServiceBusy && chatterboxJustStarted) ? { label: "Chatterbox TTS", state: "started" } : null,
+    (!comfyuiServiceBusy    && comfyuiJustStarted)    ? { label: "ComfyUI",        state: "started" } : null,
   ].filter(Boolean);
   toasts.forEach(({ label, state }) => {
     const pill = document.createElement("div");
@@ -2724,7 +2959,7 @@ function updateServiceToasts() {
   });
 }
 
-// â”€â”€ Kokoro TTS service management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Kokoro TTS service management â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 let kokoroServiceRunning = false;
 let kokoroServiceAvailable = false;
@@ -2794,7 +3029,7 @@ async function toggleKokoroService() {
       }
     }
   } catch {
-    // ignore â€“ status check below will update UI
+    // ignore â€" status check below will update UI
   }
 
   const wasStarting = !kokoroServiceRunning;
@@ -2813,7 +3048,148 @@ if (kokoroToggleBtn) {
 
 checkKokoroStatus();
 
-// â”€â”€ ComfyUI image service management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Chatterbox TTS service management ─────────────────────────────────────────────
+
+let chatterboxServiceRunning = false;
+let chatterboxServiceAvailable = false;
+let chatterboxServiceBusy = false;
+let chatterboxJustStarted = false;
+
+function updateChatterboxUI() {
+  if (!chatterboxToggleBtn || !chatterboxStatusDot || !chatterboxStatusText) return;
+
+  chatterboxStatusDot.classList.remove("running", "stopped", "unavailable");
+  hdrChatterboxDot?.classList.remove("running", "stopped", "unavailable");
+
+  if (!chatterboxServiceAvailable) {
+    chatterboxStatusDot.classList.add("unavailable");
+    hdrChatterboxDot?.classList.add("unavailable");
+    chatterboxStatusText.textContent = "Unavailable";
+    chatterboxToggleBtn.textContent = "Launch";
+    chatterboxToggleBtn.disabled = true;
+  } else if (chatterboxServiceBusy) {
+    chatterboxStatusDot.classList.add("stopped");
+    hdrChatterboxDot?.classList.add("stopped");
+    chatterboxStatusText.textContent = chatterboxServiceRunning ? "Stopping…" : "Starting…";
+    chatterboxToggleBtn.textContent = chatterboxServiceRunning ? "Stop Service" : "Launch";
+    chatterboxToggleBtn.disabled = true;
+  } else if (chatterboxServiceRunning) {
+    chatterboxStatusDot.classList.add("running");
+    hdrChatterboxDot?.classList.add("running");
+    chatterboxStatusText.textContent = "Running";
+    chatterboxToggleBtn.textContent = "Stop Service";
+    chatterboxToggleBtn.disabled = false;
+  } else {
+    chatterboxStatusDot.classList.add("stopped");
+    hdrChatterboxDot?.classList.add("stopped");
+    chatterboxStatusText.textContent = "Stopped";
+    chatterboxToggleBtn.textContent = "Launch";
+    chatterboxToggleBtn.disabled = false;
+  }
+  updateServiceToasts();
+}
+
+async function checkChatterboxStatus() {
+  try {
+    const res = await fetch("/api/chatterbox/status");
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    chatterboxServiceRunning = !!data.running;
+    chatterboxServiceAvailable = !!data.available;
+  } catch {
+    chatterboxServiceRunning = false;
+    chatterboxServiceAvailable = false;
+  }
+  updateChatterboxUI();
+}
+
+async function toggleChatterboxService() {
+  if (chatterboxServiceBusy) return;
+  if (chatterboxServiceRunning && !confirm("Stop the Chatterbox TTS service?")) return;
+  chatterboxServiceBusy = true;
+  updateChatterboxUI();
+
+  try {
+    if (chatterboxServiceRunning) {
+      await fetch("/api/chatterbox/stop", { method: "POST" });
+    } else {
+      await fetch("/api/chatterbox/start", { method: "POST" });
+    }
+  } catch {
+    // ignore — status check below will update UI
+  }
+
+  const wasStarting = !chatterboxServiceRunning;
+  chatterboxServiceBusy = false;
+  await checkChatterboxStatus();
+  if (wasStarting && chatterboxServiceRunning) {
+    chatterboxJustStarted = true;
+    updateServiceToasts();
+    setTimeout(() => { chatterboxJustStarted = false; updateServiceToasts(); }, 3000);
+  }
+}
+
+if (chatterboxToggleBtn) {
+  chatterboxToggleBtn.addEventListener("click", toggleChatterboxService);
+}
+
+// Wire up ttsProviderToggle multi-button group
+if (ttsProviderToggle) {
+  ttsProviderToggle.querySelectorAll(".setting-option").forEach((btn) => {
+    btn.addEventListener("click", () => setTtsProvider(btn.dataset.value));
+  });
+}
+
+// Wire up Chatterbox voice selector
+const chatterboxVoiceSelect = document.getElementById("chatterboxVoiceSelect");
+if (chatterboxVoiceSelect) {
+  chatterboxVoiceSelect.addEventListener("change", () => {
+    chatterboxVoice = chatterboxVoiceSelect.value;
+    localStorage.setItem(TTS_VOICE_CHATTERBOX_KEY, chatterboxVoice);
+  });
+}
+
+// Wire up Chatterbox voice pane sliders
+const chatterboxExaggerationInput = document.getElementById("chatterboxExaggerationInput");
+const chatterboxExaggerationVal = document.getElementById("chatterboxExaggerationVal");
+const chatterboxCfgWeightInput = document.getElementById("chatterboxCfgWeightInput");
+const chatterboxCfgWeightVal = document.getElementById("chatterboxCfgWeightVal");
+const chatterboxTemperatureInput = document.getElementById("chatterboxTemperatureInput");
+const chatterboxTemperatureVal = document.getElementById("chatterboxTemperatureVal");
+
+if (chatterboxExaggerationInput) {
+  chatterboxExaggerationInput.addEventListener("input", () => {
+    chatterboxExaggeration = parseFloat(chatterboxExaggerationInput.value);
+    if (chatterboxExaggerationVal) chatterboxExaggerationVal.textContent = chatterboxExaggeration.toFixed(2);
+    saveConfigKey(CHATTERBOX_EXAGGERATION_KEY, chatterboxExaggeration);
+  });
+}
+if (chatterboxCfgWeightInput) {
+  chatterboxCfgWeightInput.addEventListener("input", () => {
+    chatterboxCfgWeight = parseFloat(chatterboxCfgWeightInput.value);
+    if (chatterboxCfgWeightVal) chatterboxCfgWeightVal.textContent = chatterboxCfgWeight.toFixed(2);
+    saveConfigKey(CHATTERBOX_CFG_WEIGHT_KEY, chatterboxCfgWeight);
+  });
+}
+if (chatterboxTemperatureInput) {
+  chatterboxTemperatureInput.addEventListener("input", () => {
+    chatterboxTemperature = parseFloat(chatterboxTemperatureInput.value);
+    if (chatterboxTemperatureVal) chatterboxTemperatureVal.textContent = chatterboxTemperature.toFixed(2);
+    saveConfigKey(CHATTERBOX_TEMPERATURE_KEY, chatterboxTemperature);
+  });
+}
+
+// Wire up Chatterbox voice test button
+const chatterboxVoiceTestBtn = document.getElementById("chatterboxVoiceTestBtn");
+if (chatterboxVoiceTestBtn) {
+  chatterboxVoiceTestBtn.addEventListener("click", () => {
+    speakWithChatterbox("Hello! This is a Chatterbox TTS voice test.", true);
+  });
+}
+
+checkChatterboxStatus();
+
+// â"€â"€ ComfyUI image service management â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 let comfyuiServiceRunning = false;
 let comfyuiServiceAvailable = false;
@@ -3098,6 +3474,12 @@ if (hdrKokoroPill) {
   hdrKokoroPill.addEventListener('click', () => openSettingsToService('kokoroServiceCard'));
 }
 
+const hdrChatterboxPill = document.getElementById('hdrChatterboxPill');
+if (hdrChatterboxPill) {
+  hdrChatterboxPill.style.cursor = 'pointer';
+  hdrChatterboxPill.addEventListener('click', () => openSettingsToService('chatterboxServiceCard'));
+}
+
 const hdrComfyuiPill = document.getElementById('hdrComfyuiPill');
 if (hdrComfyuiPill) {
   hdrComfyuiPill.style.cursor = 'pointer';
@@ -3161,7 +3543,7 @@ if (ragTopKInput) {
   });
 }
 
-// â”€â”€ Personality system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Personality system â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 function loadPersonalities() {
   const stored = _cfg('personalities', null);
@@ -3189,7 +3571,8 @@ function getActivePersonality() {
 }
 
 function applyPersonalityTts(p) {
-  const provider = p.ttsProvider || "browser";
+  const provider = p.ttsProvider;
+  if (!provider) return;
   if (p.ttsVoice) {
     // Write to localStorage before setTtsProvider so that populateKokoroVoices
     // (which reads localStorage after its async fetch) picks up the right voice.
@@ -3262,9 +3645,16 @@ function peUpdateTtsProviderUI() {
 
 function populatePeVoiceSelect(selectedVoice) {
   if (!peTtsVoiceSelect) return;
-  peTtsVoiceSelect.innerHTML = '<option value="">â€” none â€”</option>';
+  peTtsVoiceSelect.innerHTML = '<option value="">&mdash; none &mdash;</option>';
   if (peTtsProvider === "kokoro") {
     kokoroVoices.forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = v;
+      opt.textContent = v;
+      peTtsVoiceSelect.appendChild(opt);
+    });
+  } else if (peTtsProvider === "chatterbox") {
+    chatterboxVoices.forEach((v) => {
       const opt = document.createElement("option");
       opt.value = v;
       opt.textContent = v;
@@ -3615,13 +4005,6 @@ if (ttsToggle) {
   });
 }
 
-if (ttsProviderToggle) {
-  ttsProviderToggle.addEventListener("click", () => {
-    const next = ttsProvider === "browser" ? "kokoro" : "browser";
-    setTtsProvider(next);
-  });
-}
-
 if (screenCaptureBtn) {
   screenCaptureBtn.addEventListener("click", async () => {
     if (screenStream) {
@@ -3684,7 +4067,7 @@ const SLASH_COMMANDS = [
       try {
         const r = await fetch("/api/cleanvram", { method: "POST" });
         if (r.ok) {
-          addChat("assistant", "VRAM cleared â€” all models unloaded.");
+          addChat("assistant", "VRAM cleared \u2014 all models unloaded.");
         } else {
           addChat("assistant", `Error: ${r.status} ${r.statusText}`);
         }
@@ -3695,7 +4078,7 @@ const SLASH_COMMANDS = [
   },
   {
     name: "/generateimage",
-    desc: 'Generate an image â€” /generateimage "prompt" [--res 1024x1024] [--raw]',
+    desc: 'Generate an image \u2014 /generateimage "prompt" [--res 1024x1024] [--raw]',
     requiresInput: true,
     async execute(args = "") {
       args = args.trim();
@@ -4047,6 +4430,21 @@ async function initApp() {
   loadModels();
 
   ttsProvider = normalizeTtsProvider(_cfg('ttsProvider', localStorage.getItem(TTS_PROVIDER_STORAGE_KEY)));
+  const storedExaggeration = _cfg(CHATTERBOX_EXAGGERATION_KEY, localStorage.getItem(CHATTERBOX_EXAGGERATION_KEY));
+  if (storedExaggeration !== null && storedExaggeration !== undefined && storedExaggeration !== "") {
+    chatterboxExaggeration = parseFloat(storedExaggeration) || 0.5;
+    if (chatterboxExaggerationInput) { chatterboxExaggerationInput.value = chatterboxExaggeration; if (chatterboxExaggerationVal) chatterboxExaggerationVal.textContent = chatterboxExaggeration.toFixed(2); }
+  }
+  const storedCfgWeight = _cfg(CHATTERBOX_CFG_WEIGHT_KEY, localStorage.getItem(CHATTERBOX_CFG_WEIGHT_KEY));
+  if (storedCfgWeight !== null && storedCfgWeight !== undefined && storedCfgWeight !== "") {
+    chatterboxCfgWeight = parseFloat(storedCfgWeight) || 0.5;
+    if (chatterboxCfgWeightInput) { chatterboxCfgWeightInput.value = chatterboxCfgWeight; if (chatterboxCfgWeightVal) chatterboxCfgWeightVal.textContent = chatterboxCfgWeight.toFixed(2); }
+  }
+  const storedTemperature = _cfg(CHATTERBOX_TEMPERATURE_KEY, localStorage.getItem(CHATTERBOX_TEMPERATURE_KEY));
+  if (storedTemperature !== null && storedTemperature !== undefined && storedTemperature !== "") {
+    chatterboxTemperature = parseFloat(storedTemperature) || 0.8;
+    if (chatterboxTemperatureInput) { chatterboxTemperatureInput.value = chatterboxTemperature; if (chatterboxTemperatureVal) chatterboxTemperatureVal.textContent = chatterboxTemperature.toFixed(2); }
+  }
   setTtsProvider(ttsProvider);
   initVoices();
   // Apply active personality TTS after voices are initialized
@@ -4215,7 +4613,7 @@ if (screenshotIntervalInput) {
     if (btn) applySocialMode(btn.dataset.value === 'on');
   });
 }());
-// â”€â”€ VRAM indicator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ VRAM indicator â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async function updateVramIndicator() {
   try {
@@ -4223,7 +4621,7 @@ async function updateVramIndicator() {
     if (!res.ok) return;
     const { used_gb, total_gb } = await res.json();
     if (used_gb === null || total_gb === null || total_gb === 0) {
-      if (thinkingVramLabel) thinkingVramLabel.textContent = "VRAM â€”";
+      if (thinkingVramLabel) thinkingVramLabel.textContent = "VRAM \u2014";
       return;
     }
     const pct = used_gb / total_gb;
@@ -4668,7 +5066,7 @@ setInterval(updateVramIndicator, 5000);
   let ctxTarget = null;   // the DOM element being acted on
   let ctxRole   = null;   // 'user' | 'assistant'
 
-  // â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â"€â"€ helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
   function getLastRealItem(role) {
     // Last non-status chat-item with the given role
@@ -4703,7 +5101,7 @@ setInterval(updateVramIndicator, 5000);
     removeLastFromHistory('user');
   }
 
-  // â”€â”€ context menu display â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â"€â"€ context menu display â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
   function hideMenu() {
     ctxMenu.hidden = true;
@@ -4749,7 +5147,7 @@ setInterval(updateVramIndicator, 5000);
     ctxMenu.style.top  = Math.min(y, vh - mh - 8) + 'px';
   }
 
-  // â”€â”€ actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â"€â"€ actions â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
   async function actionRegenerateAssistant() {
     const prompt = lastUserPrompt;
@@ -4892,7 +5290,7 @@ setInterval(updateVramIndicator, 5000);
     });
   }
 
-  // â”€â”€ right-click handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â"€â"€ right-click handler â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
   chatLog.addEventListener('contextmenu', e => {
     const item = e.target.closest('.chat-item');
@@ -4928,7 +5326,7 @@ setInterval(updateVramIndicator, 5000);
     showMenu(e.clientX, e.clientY, menuItems);
   });
 
-  // â”€â”€ close on outside click / scroll / Escape â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â"€â"€ close on outside click / scroll / Escape â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
   document.addEventListener('click', e => {
     if (!ctxMenu.hidden && !ctxMenu.contains(e.target)) hideMenu();

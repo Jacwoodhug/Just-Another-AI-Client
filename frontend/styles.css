@@ -977,7 +977,8 @@ select:disabled { opacity: 0.5; cursor: not-allowed; }
 .setting-option.active { background: rgba(212, 87, 42, 0.75); color: #fff; }
 
 /* Voice pill wrapper — hidden when TTS is disabled */
-.voice-pill { display: flex; flex-direction: column; gap: 10px; }
+.voice-pill,
+.chatterbox-params-pill { display: flex; flex-direction: column; gap: 10px; }
 .tts-hidden { visibility: hidden; pointer-events: none; }
 
 /* Service cards */

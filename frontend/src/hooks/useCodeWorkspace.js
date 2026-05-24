@@ -175,7 +175,8 @@ export function useCodeWorkspace() {
     const POLL_MS = 5000;
     const id = setInterval(() => {
       // Skip poll while the AI is actively running (it will refresh on response)
-      if (!runningRef.current) refreshTree();
+      // Also skip when not on the code workspace tab
+      if (!runningRef.current && localStorage.getItem('activeWorkspace') === 'code') refreshTree();
     }, POLL_MS);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
