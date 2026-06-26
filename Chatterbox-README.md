@@ -29,6 +29,12 @@ If you ever need to reinstall:
 ```
 Run this from the `backend/` directory.
 
+### Cloud / LAN service
+Use the sibling `chatterbox-service/` folder to run Chatterbox on another machine. Put voice reference files on that machine in `chatterbox-service/voices/`, start the service there, then open **Settings -> Services -> Chatterbox TTS** in the main app, switch **Host** to **Cloud**, and enter `IP:5006`.
+
+### Voice management
+Open **Settings -> Services -> Chatterbox TTS** to upload, refresh, and remove Chatterbox voices. In **Local** mode, files are managed in `chatter-voices/`. In **Cloud** mode, files are uploaded to or removed from the remote service machine.
+
 ---
 
 ## Using Chatterbox for TTS

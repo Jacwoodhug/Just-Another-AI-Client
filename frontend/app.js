@@ -75,6 +75,17 @@ const chatterboxStatusDot = document.getElementById("chatterboxStatusDot");
 const chatterboxStatusText = document.getElementById("chatterboxStatusText");
 const hdrChatterboxDot = document.getElementById("hdrChatterboxDot");
 const chatterboxParamsPill = document.getElementById("chatterboxParamsPill");
+const chatterboxModeToggle = document.getElementById("chatterboxModeToggle");
+const chatterboxCloudSettings = document.getElementById("chatterboxCloudSettings");
+const chatterboxRemoteRow = document.getElementById("chatterboxRemoteRow");
+const chatterboxRemoteUrlInput = document.getElementById("chatterboxRemoteUrlInput");
+const chatterboxRemoteSaveBtn = document.getElementById("chatterboxRemoteSaveBtn");
+const chatterboxVoiceUploadInput = document.getElementById("chatterboxVoiceUploadInput");
+const chatterboxVoiceUploadBtn = document.getElementById("chatterboxVoiceUploadBtn");
+const chatterboxVoiceManageSelect = document.getElementById("chatterboxVoiceManageSelect");
+const chatterboxVoiceRefreshBtn = document.getElementById("chatterboxVoiceRefreshBtn");
+const chatterboxVoiceDeleteBtn = document.getElementById("chatterboxVoiceDeleteBtn");
+const chatterboxVoiceManageStatus = document.getElementById("chatterboxVoiceManageStatus");
 const comfyuiToggleBtn = document.getElementById("comfyuiToggleBtn");
 const comfyuiStatusDot = document.getElementById("comfyuiStatusDot");
 const comfyuiStatusText = document.getElementById("comfyuiStatusText");
@@ -166,9 +177,13 @@ const TTS_VOICE_CHATTERBOX_KEY = "ttsVoiceChatterbox";
 const CHATTERBOX_EXAGGERATION_KEY = "chatterboxExaggeration";
 const CHATTERBOX_CFG_WEIGHT_KEY = "chatterboxCfgWeight";
 const CHATTERBOX_TEMPERATURE_KEY = "chatterboxTemperature";
+const CHATTERBOX_SERVICE_MODE_KEY = "chatterboxServiceMode";
+const CHATTERBOX_REMOTE_URL_KEY = "chatterboxRemoteUrl";
 let chatterboxExaggeration = 0.5;
 let chatterboxCfgWeight = 0.5;
 let chatterboxTemperature = 0.8;
+let chatterboxServiceMode = "local";
+let chatterboxRemoteUrl = "";
 let chatterboxVoice = localStorage.getItem(TTS_VOICE_CHATTERBOX_KEY) || "";
 let chatterboxQueue = [];
 let chatterboxPlaying = false;
@@ -411,7 +426,9 @@ function ttsProviderLabel(provider) {
 }
 
 function getTtsVoiceStorageKey(provider) {
-  return provider === "kokoro" ? TTS_VOICE_KOKORO_KEY : TTS_VOICE_BROWSER_KEY;
+  if (provider === "kokoro") return TTS_VOICE_KOKORO_KEY;
+  if (provider === "chatterbox") return TTS_VOICE_CHATTERBOX_KEY;
+  return TTS_VOICE_BROWSER_KEY;
 }
 
 function updateTtsControls() {
@@ -2805,7 +2822,91 @@ async function loadChatterboxVoices() {
       chatterboxVoice = "";
     }
     if (peTtsProvider === "chatterbox") populatePeVoiceSelect();
+    renderChatterboxVoiceManager();
   } catch (e) {}
+}
+
+function setChatterboxVoiceManageStatus(text, isError = false) {
+  if (!chatterboxVoiceManageStatus) return;
+  chatterboxVoiceManageStatus.textContent = text || "";
+  chatterboxVoiceManageStatus.style.color = isError ? "#c44" : "var(--muted)";
+}
+
+function renderChatterboxVoiceManager() {
+  if (!chatterboxVoiceManageSelect) return;
+  const previous = chatterboxVoiceManageSelect.value;
+  chatterboxVoiceManageSelect.innerHTML = "";
+  if (!chatterboxVoices.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No voices found";
+    chatterboxVoiceManageSelect.appendChild(opt);
+  } else {
+    chatterboxVoices.forEach((voice) => {
+      const opt = document.createElement("option");
+      opt.value = voice;
+      opt.textContent = voice;
+      chatterboxVoiceManageSelect.appendChild(opt);
+    });
+    chatterboxVoiceManageSelect.value = chatterboxVoices.includes(previous) ? previous : chatterboxVoices[0];
+  }
+  if (chatterboxVoiceDeleteBtn) chatterboxVoiceDeleteBtn.disabled = chatterboxVoices.length === 0;
+}
+
+async function uploadChatterboxVoice() {
+  const file = chatterboxVoiceUploadInput?.files?.[0];
+  if (!file) {
+    setChatterboxVoiceManageStatus("Choose a voice file first.", true);
+    return;
+  }
+  setChatterboxVoiceManageStatus("Uploading...");
+  if (chatterboxVoiceUploadBtn) chatterboxVoiceUploadBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/chatterbox/voices?filename=${encodeURIComponent(file.name)}`, {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/octet-stream" },
+      body: file,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `Upload failed (${res.status})`);
+    }
+    const data = await res.json();
+    setChatterboxVoiceManageStatus(`Uploaded ${data.voice || file.name}.`);
+    if (chatterboxVoiceUploadInput) chatterboxVoiceUploadInput.value = "";
+    await loadChatterboxVoices();
+    if (data.voice && chatterboxVoiceManageSelect) chatterboxVoiceManageSelect.value = data.voice;
+  } catch (err) {
+    setChatterboxVoiceManageStatus(err.message || "Upload failed.", true);
+  } finally {
+    if (chatterboxVoiceUploadBtn) chatterboxVoiceUploadBtn.disabled = false;
+  }
+}
+
+async function deleteChatterboxVoice() {
+  const voice = chatterboxVoiceManageSelect ? chatterboxVoiceManageSelect.value : "";
+  if (!voice) return;
+  if (!confirm(`Remove Chatterbox voice "${voice}"?`)) return;
+  setChatterboxVoiceManageStatus("Removing...");
+  if (chatterboxVoiceDeleteBtn) chatterboxVoiceDeleteBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/chatterbox/voices/${encodeURIComponent(voice)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `Remove failed (${res.status})`);
+    }
+    if (chatterboxVoice === voice) {
+      chatterboxVoice = "";
+      localStorage.setItem(TTS_VOICE_CHATTERBOX_KEY, "");
+      saveConfigKey("ttsVoiceChatterbox", "");
+    }
+    setChatterboxVoiceManageStatus(`Removed ${voice}.`);
+    await loadChatterboxVoices();
+  } catch (err) {
+    setChatterboxVoiceManageStatus(err.message || "Remove failed.", true);
+  } finally {
+    if (chatterboxVoiceDeleteBtn) chatterboxVoiceDeleteBtn.disabled = chatterboxVoices.length === 0;
+  }
 }
 
 async function applyAudioOutputDevice(deviceId) {
@@ -2922,6 +3023,7 @@ function openSettings() {
   populateAudioOutputDevices();
   checkKokoroStatus();
   checkChatterboxStatus();
+  loadChatterboxVoices();
   checkComfyUIStatus();
   loadComfyUIModels();
 }
@@ -3055,13 +3157,42 @@ let chatterboxServiceAvailable = false;
 let chatterboxServiceBusy = false;
 let chatterboxJustStarted = false;
 
+function normalizeChatterboxServiceMode(value) {
+  return value === "cloud" ? "cloud" : "local";
+}
+
+function updateChatterboxModeUI() {
+  if (chatterboxModeToggle) {
+    chatterboxModeToggle.querySelectorAll(".setting-option").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.value === chatterboxServiceMode);
+    });
+  }
+  const showCloudSettings = chatterboxServiceMode === "cloud";
+  if (chatterboxCloudSettings) chatterboxCloudSettings.hidden = !showCloudSettings;
+  if (chatterboxRemoteRow) chatterboxRemoteRow.hidden = !showCloudSettings;
+  if (chatterboxRemoteUrlInput) chatterboxRemoteUrlInput.value = chatterboxRemoteUrl;
+}
+
 function updateChatterboxUI() {
   if (!chatterboxToggleBtn || !chatterboxStatusDot || !chatterboxStatusText) return;
 
   chatterboxStatusDot.classList.remove("running", "stopped", "unavailable");
   hdrChatterboxDot?.classList.remove("running", "stopped", "unavailable");
+  updateChatterboxModeUI();
 
-  if (!chatterboxServiceAvailable) {
+  if (chatterboxServiceMode === "cloud") {
+    if (chatterboxServiceRunning) {
+      chatterboxStatusDot.classList.add("running");
+      hdrChatterboxDot?.classList.add("running");
+      chatterboxStatusText.textContent = "Cloud connected";
+    } else {
+      chatterboxStatusDot.classList.add(chatterboxServiceAvailable ? "stopped" : "unavailable");
+      hdrChatterboxDot?.classList.add(chatterboxServiceAvailable ? "stopped" : "unavailable");
+      chatterboxStatusText.textContent = chatterboxServiceAvailable ? "Cloud offline" : "Cloud URL needed";
+    }
+    chatterboxToggleBtn.textContent = "Remote";
+    chatterboxToggleBtn.disabled = true;
+  } else if (!chatterboxServiceAvailable) {
     chatterboxStatusDot.classList.add("unavailable");
     hdrChatterboxDot?.classList.add("unavailable");
     chatterboxStatusText.textContent = "Unavailable";
@@ -3096,6 +3227,8 @@ async function checkChatterboxStatus() {
     const data = await res.json();
     chatterboxServiceRunning = !!data.running;
     chatterboxServiceAvailable = !!data.available;
+    chatterboxServiceMode = normalizeChatterboxServiceMode(data.mode || chatterboxServiceMode);
+    chatterboxRemoteUrl = Object.prototype.hasOwnProperty.call(data, "remote_url") ? (data.remote_url || "") : chatterboxRemoteUrl;
   } catch {
     chatterboxServiceRunning = false;
     chatterboxServiceAvailable = false;
@@ -3133,6 +3266,43 @@ if (chatterboxToggleBtn) {
   chatterboxToggleBtn.addEventListener("click", toggleChatterboxService);
 }
 
+if (chatterboxModeToggle) {
+  chatterboxModeToggle.addEventListener("click", async (event) => {
+    const btn = event.target.closest(".setting-option");
+    if (!btn) return;
+    chatterboxServiceMode = normalizeChatterboxServiceMode(btn.dataset.value);
+    updateChatterboxModeUI();
+    await saveConfigKey(CHATTERBOX_SERVICE_MODE_KEY, chatterboxServiceMode);
+    await checkChatterboxStatus();
+    loadChatterboxVoices();
+  });
+}
+
+if (chatterboxRemoteSaveBtn) {
+  chatterboxRemoteSaveBtn.addEventListener("click", async () => {
+    chatterboxRemoteUrl = chatterboxRemoteUrlInput ? chatterboxRemoteUrlInput.value.trim() : "";
+    await saveConfigKey(CHATTERBOX_REMOTE_URL_KEY, chatterboxRemoteUrl);
+    await checkChatterboxStatus();
+    loadChatterboxVoices();
+  });
+}
+
+if (chatterboxVoiceUploadBtn) {
+  chatterboxVoiceUploadBtn.addEventListener("click", uploadChatterboxVoice);
+}
+
+if (chatterboxVoiceRefreshBtn) {
+  chatterboxVoiceRefreshBtn.addEventListener("click", async () => {
+    setChatterboxVoiceManageStatus("Refreshing...");
+    await loadChatterboxVoices();
+    setChatterboxVoiceManageStatus("");
+  });
+}
+
+if (chatterboxVoiceDeleteBtn) {
+  chatterboxVoiceDeleteBtn.addEventListener("click", deleteChatterboxVoice);
+}
+
 // Wire up ttsProviderToggle multi-button group
 if (ttsProviderToggle) {
   ttsProviderToggle.querySelectorAll(".setting-option").forEach((btn) => {
@@ -3146,6 +3316,7 @@ if (chatterboxVoiceSelect) {
   chatterboxVoiceSelect.addEventListener("change", () => {
     chatterboxVoice = chatterboxVoiceSelect.value;
     localStorage.setItem(TTS_VOICE_CHATTERBOX_KEY, chatterboxVoice);
+    saveConfigKey('ttsVoiceChatterbox', chatterboxVoice);
   });
 }
 
@@ -3577,7 +3748,7 @@ function applyPersonalityTts(p) {
     // Write to localStorage before setTtsProvider so that populateKokoroVoices
     // (which reads localStorage after its async fetch) picks up the right voice.
     localStorage.setItem(getTtsVoiceStorageKey(provider), p.ttsVoice);
-    const cfgKey = provider === 'kokoro' ? 'ttsVoiceKokoro' : 'ttsVoice';
+    const cfgKey = provider === 'kokoro' ? 'ttsVoiceKokoro' : (provider === 'chatterbox' ? 'ttsVoiceChatterbox' : 'ttsVoice');
     saveConfigKey(cfgKey, p.ttsVoice);
   }
   setTtsProvider(provider);
@@ -3981,7 +4152,7 @@ if (voiceSelect) {
   voiceSelect.addEventListener("change", () => {
     if (voiceSelect.value) {
       localStorage.setItem(getTtsVoiceStorageKey(ttsProvider), voiceSelect.value);
-      const cfgKey = ttsProvider === 'kokoro' ? 'ttsVoiceKokoro' : 'ttsVoice';
+      const cfgKey = ttsProvider === 'kokoro' ? 'ttsVoiceKokoro' : (ttsProvider === 'chatterbox' ? 'ttsVoiceChatterbox' : 'ttsVoice');
       saveConfigKey(cfgKey, voiceSelect.value);
     }
   });
@@ -4445,6 +4616,10 @@ async function initApp() {
     chatterboxTemperature = parseFloat(storedTemperature) || 0.8;
     if (chatterboxTemperatureInput) { chatterboxTemperatureInput.value = chatterboxTemperature; if (chatterboxTemperatureVal) chatterboxTemperatureVal.textContent = chatterboxTemperature.toFixed(2); }
   }
+  chatterboxServiceMode = normalizeChatterboxServiceMode(_cfg(CHATTERBOX_SERVICE_MODE_KEY, chatterboxServiceMode));
+  chatterboxRemoteUrl = _cfg(CHATTERBOX_REMOTE_URL_KEY, chatterboxRemoteUrl) || "";
+  chatterboxVoice = _cfg('ttsVoiceChatterbox', chatterboxVoice) || "";
+  updateChatterboxModeUI();
   setTtsProvider(ttsProvider);
   initVoices();
   // Apply active personality TTS after voices are initialized
@@ -5349,4 +5524,3 @@ setInterval(updateVramIndicator, 5000);
     resetIdleCaptureTimer();
   };
 }());
-

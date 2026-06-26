@@ -11,9 +11,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote
 
 import requests
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,7 +55,7 @@ OPENROUTER_FREE_ONLY = os.getenv("OPENROUTER_FREE_ONLY", "true").lower() in (
 KOKORO_BASE_URL = os.getenv("KOKORO_BASE_URL", "http://localhost:5005").rstrip("/")
 KOKORO_PORT = os.getenv("KOKORO_PORT", "5005")
 
-CHATTERBOX_BASE_URL = os.getenv("CHATTERBOX_BASE_URL", "http://localhost:5006").rstrip("/")
+CHATTERBOX_LOCAL_BASE_URL = os.getenv("CHATTERBOX_BASE_URL", "http://localhost:5006").rstrip("/")
 CHATTERBOX_PORT = os.getenv("CHATTERBOX_PORT", "5006")
 
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://localhost:8188").rstrip("/")
@@ -93,6 +94,8 @@ DEFAULT_USER_CONFIG: Dict[str, Any] = {
     "chatterboxExaggeration": 0.5,
     "chatterboxCfgWeight": 0.5,
     "chatterboxTemperature": 0.8,
+    "chatterboxServiceMode": "local",
+    "chatterboxRemoteUrl": "",
     "llmProvider": "ollama",
     "ollamaModel": "",
     "openrouterModel": "",
@@ -217,10 +220,48 @@ def _chatterbox_venv_python() -> Optional[str]:
     return str(candidate) if candidate.exists() else None
 
 
+def _normalize_chatterbox_url(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if not re.match(r"^https?://", value, re.IGNORECASE):
+        value = f"http://{value}"
+    return value.rstrip("/")
+
+
+def _chatterbox_service_config() -> Dict[str, Any]:
+    cfg = _load_user_config()
+    mode = str(cfg.get("chatterboxServiceMode", "local")).strip().lower()
+    if mode not in {"local", "cloud"}:
+        mode = "local"
+    remote_url = _normalize_chatterbox_url(str(cfg.get("chatterboxRemoteUrl", "")))
+    base_url = remote_url if mode == "cloud" else CHATTERBOX_LOCAL_BASE_URL
+    return {
+        "mode": mode,
+        "base_url": base_url,
+        "remote_url": remote_url,
+        "managed": mode == "local",
+    }
+
+
+def _chatterbox_base_url() -> str:
+    return str(_chatterbox_service_config()["base_url"])
+
+
+def _require_chatterbox_base_url() -> str:
+    base_url = _chatterbox_base_url()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="Chatterbox cloud URL is not configured")
+    return base_url
+
+
 def _chatterbox_health_check() -> bool:
     """Return True if the Chatterbox service responds to a health check."""
     try:
-        r = requests.get(f"{CHATTERBOX_BASE_URL}/health", timeout=2)
+        base_url = _chatterbox_base_url()
+        if not base_url:
+            return False
+        r = requests.get(f"{base_url}/health", timeout=2)
         return r.status_code == 200
     except Exception:
         return False
@@ -3603,14 +3644,25 @@ def kokoro_stop() -> Dict[str, str]:
 
 @app.get("/api/chatterbox/status")
 def chatterbox_status() -> Dict[str, Any]:
+    service = _chatterbox_service_config()
     running = _is_chatterbox_running()
-    available = _chatterbox_venv_python() is not None
-    return {"running": running, "available": available, "managed": True}
+    available = bool(service["remote_url"]) if service["mode"] == "cloud" else _chatterbox_venv_python() is not None
+    return {
+        "running": running,
+        "available": available,
+        "managed": service["managed"],
+        "mode": service["mode"],
+        "base_url": service["base_url"],
+        "remote_url": service["remote_url"],
+    }
 
 
 @app.post("/api/chatterbox/start")
 def chatterbox_start() -> Dict[str, str]:
     global _chatterbox_process
+    service = _chatterbox_service_config()
+    if not service["managed"]:
+        raise HTTPException(status_code=400, detail="Cloud Chatterbox services are started on the remote machine")
     if _is_chatterbox_running():
         return {"status": "already_running"}
     python = _chatterbox_venv_python()
@@ -3644,6 +3696,8 @@ def chatterbox_start() -> Dict[str, str]:
 
 @app.post("/api/chatterbox/stop")
 def chatterbox_stop() -> Dict[str, str]:
+    if not _chatterbox_service_config()["managed"]:
+        return {"status": "cloud_mode"}
     _stop_chatterbox()
     return {"status": "stopped"}
 
@@ -3652,15 +3706,121 @@ _CHATTER_VOICES_DIR = os.path.join(os.path.dirname(__file__), "..", "chatter-voi
 _CHATTER_AUDIO_EXTS = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
 
 
+def _safe_chatter_voice_filename(filename: str) -> str:
+    raw = Path(filename or "").name.strip()
+    stem = Path(raw).stem.strip()
+    ext = Path(raw).suffix.lower()
+    if not stem or ext not in _CHATTER_AUDIO_EXTS:
+        raise HTTPException(status_code=400, detail="Voice file must be .wav, .mp3, .ogg, .flac, or .m4a")
+    stem = "".join(ch if ch.isalnum() or ch in (" ", "-", "_", ".") else "_" for ch in stem).strip(" .")
+    if not stem:
+        raise HTTPException(status_code=400, detail="Voice filename is invalid")
+    return f"{stem}{ext}"
+
+
+def _local_chatter_voice_path(filename: str) -> Path:
+    voices_dir = Path(_CHATTER_VOICES_DIR).resolve()
+    candidate = (voices_dir / _safe_chatter_voice_filename(filename)).resolve()
+    try:
+        candidate.relative_to(voices_dir)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Voice filename is invalid") from exc
+    return candidate
+
+
+def _delete_local_chatter_voice(voice_name: str) -> list[str]:
+    stem = Path(voice_name or "").stem.strip()
+    stem = "".join(ch if ch.isalnum() or ch in (" ", "-", "_", ".") else "_" for ch in stem).strip(" .")
+    if not stem:
+        raise HTTPException(status_code=400, detail="Voice name is required")
+
+    voices_dir = Path(_CHATTER_VOICES_DIR).resolve()
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    deleted: list[str] = []
+    for ext in _CHATTER_AUDIO_EXTS:
+        candidate = (voices_dir / f"{stem}{ext}").resolve()
+        try:
+            candidate.relative_to(voices_dir)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            candidate.unlink()
+            deleted.append(candidate.name)
+    return deleted
+
+
 @app.get("/api/chatterbox/voices")
 def chatterbox_voices() -> Dict[str, Any]:
     voices: list[str] = []
+    service = _chatterbox_service_config()
+    if service["mode"] == "cloud":
+        try:
+            response = requests.get(f"{service['base_url']}/voices", timeout=5)
+            response.raise_for_status()
+            data = response.json()
+            remote_voices = data.get("voices") if isinstance(data, dict) else []
+            if isinstance(remote_voices, list):
+                voices = [str(v) for v in remote_voices if str(v).strip()]
+        except requests.RequestException:
+            voices = []
+        return {"voices": voices}
+
     if os.path.isdir(_CHATTER_VOICES_DIR):
         for f in sorted(os.listdir(_CHATTER_VOICES_DIR)):
             ext = os.path.splitext(f)[1].lower()
             if ext in _CHATTER_AUDIO_EXTS:
                 voices.append(os.path.splitext(f)[0])
     return {"voices": voices}
+
+
+@app.post("/api/chatterbox/voices")
+async def chatterbox_upload_voice(filename: str, request: Request) -> Dict[str, Any]:
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="Voice file is empty")
+
+    service = _chatterbox_service_config()
+    if service["mode"] == "cloud":
+        try:
+            response = requests.post(
+                f"{_require_chatterbox_base_url()}/voices",
+                params={"filename": filename},
+                data=data,
+                headers={"Content-Type": request.headers.get("content-type", "application/octet-stream")},
+                timeout=120,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Chatterbox voice upload error: {exc}") from exc
+
+    dest = _local_chatter_voice_path(filename)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    for ext in _CHATTER_AUDIO_EXTS:
+        existing = dest.parent / f"{dest.stem}{ext}"
+        if existing.exists() and existing.resolve() != dest:
+            existing.unlink()
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    return {"status": "ok", "voice": dest.stem, "filename": dest.name}
+
+
+@app.delete("/api/chatterbox/voices/{voice_name}")
+def chatterbox_delete_voice(voice_name: str) -> Dict[str, Any]:
+    service = _chatterbox_service_config()
+    if service["mode"] == "cloud":
+        try:
+            response = requests.delete(f"{_require_chatterbox_base_url()}/voices/{quote(voice_name, safe='')}", timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Chatterbox voice delete error: {exc}") from exc
+
+    deleted = _delete_local_chatter_voice(voice_name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Voice not found")
+    return {"status": "ok", "voice": Path(voice_name).stem, "deleted": deleted}
 
 
 @app.get("/api/chatterbox/tts")
@@ -3680,7 +3840,7 @@ def chatterbox_tts_proxy(
         payload["cfg_weight"] = cfg_weight
     if temperature is not None:
         payload["temperature"] = temperature
-    url = f"{CHATTERBOX_BASE_URL}/tts"
+    url = f"{_require_chatterbox_base_url()}/tts"
     try:
         response = requests.post(url, json=payload, stream=True, timeout=120)
         response.raise_for_status()
@@ -3719,7 +3879,7 @@ def chatterbox_tts_stream_proxy(
         payload["temperature"] = temperature
     if voice:
         payload["audio_prompt_path"] = voice
-    url = f"{CHATTERBOX_BASE_URL}/tts/stream"
+    url = f"{_require_chatterbox_base_url()}/tts/stream"
     try:
         response = requests.post(url, json=payload, stream=True, timeout=120)
         response.raise_for_status()
@@ -5178,4 +5338,3 @@ def code_history_limit(request: CodeHistoryLimitRequest) -> Dict[str, Any]:
 def code_undo_redo_state(code_session_id: str) -> Dict[str, Any]:
     undo_s, redo_s = _undo_redo_summaries(code_session_id)
     return {"next_undo_summary": undo_s, "next_redo_summary": redo_s}
-

@@ -74,6 +74,17 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/voices")
+def voices() -> dict:
+    results: list[str] = []
+    if os.path.isdir(CHATTER_VOICES_DIR):
+        for filename in sorted(os.listdir(CHATTER_VOICES_DIR)):
+            stem, ext = os.path.splitext(filename)
+            if ext.lower() in _AUDIO_EXTENSIONS:
+                results.append(stem)
+    return {"voices": results}
+
+
 @app.post("/tts")
 async def synthesize(request: TTSRequest) -> StreamingResponse:
     text = (request.text or "").strip()
